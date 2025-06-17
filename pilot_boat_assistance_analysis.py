@@ -5,19 +5,21 @@ Maritime Pilot Boat Assistance Analysis with Dynamic Proximity Thresholds
 
 This script analyzes pilot boat assistance operations using vessel-specific proximity
 thresholds based on vessel dimensions AND directional validation (course alignment
-within 45°). This approach provides more realistic proximity detection by accounting
+within 20°). This approach provides more realistic proximity detection by accounting
 for vessel size differences in maritime operations.
 
 Features:
 - Dynamic proximity thresholds based on vessel dimensions (2 × max vessel width)
 - Fallback to 100m threshold when vessel data unavailable
-- Directional validation using course alignment (≤45° difference)
+- Directional validation using course alignment (≤20° difference)
 - Support for AIS COG data or calculated bearing from position history
 - Special handling for stationary vessels (SOG < 0.5 knots)
 - Temporal continuity analysis for assistance sessions
 - Performance optimization using Polars for large datasets
 - Comprehensive validation statistics and threshold reporting
 - Safety limits: 50m minimum, 500m maximum proximity thresholds
+- Vessel size filtering: excludes vessels with width ≤ 2m or LOA < 60m
+- Speed similarity validation: both vessels must have SOG 5-10 knots with ≤3 knot difference
 
 Author: Maritime Analysis System
 Date: 2024
@@ -46,7 +48,7 @@ class PilotBoatAssistanceAnalyzer:
         self.pilot_boat_excel_path = pilot_boat_excel_path
         self.static_data_path = static_data_path
         self.default_proximity_threshold = 100  # meters (fallback when no vessel data)
-        self.course_alignment_threshold = 45  # degrees (±45°)
+        self.course_alignment_threshold = 20  # degrees (±20°) - Updated from 45°
         self.use_dynamic_thresholds = static_data_path is not None
 
         # Data containers
@@ -204,14 +206,48 @@ class PilotBoatAssistanceAnalyzer:
         is_aligned = course_diff <= self.course_alignment_threshold
         return is_aligned, course_diff
 
+    def is_speed_similar(self, pilot_sog, vessel_sog):
+        """
+        Check if pilot boat and vessel have similar speeds for assistance operations.
+        Both vessels must have SOG between 5-10 knots with speed difference ≤ 3 knots.
+
+        Args:
+            pilot_sog: Pilot boat Speed Over Ground in knots
+            vessel_sog: Vessel Speed Over Ground in knots
+
+        Returns:
+            Boolean indicating if speeds are similar, and the speed difference
+        """
+        # Handle NaN values
+        if pd.isna(pilot_sog) or pd.isna(vessel_sog):
+            return False, np.nan
+
+        # Convert to float to ensure proper comparison
+        pilot_sog = float(pilot_sog) if not pd.isna(pilot_sog) else 0.0
+        vessel_sog = float(vessel_sog) if not pd.isna(vessel_sog) else 0.0
+
+        # Check if both vessels are in the operational speed range (5-10 knots)
+        pilot_in_range = 5.0 <= pilot_sog <= 10.0
+        vessel_in_range = 5.0 <= vessel_sog <= 10.0
+
+        if not (pilot_in_range and vessel_in_range):
+            return False, abs(pilot_sog - vessel_sog)
+
+        # Check if speed difference is within acceptable range (≤ 3 knots)
+        speed_diff = abs(pilot_sog - vessel_sog)
+        is_similar = speed_diff <= 3.0
+
+        return is_similar, speed_diff
+
     def load_static_vessel_data(self):
         """
-        Load static vessel data containing vessel dimensions.
+        Load static vessel data containing vessel dimensions with size filtering.
+        Excludes vessels with width ≤ 2 meters or LOA < 60 meters.
         """
         if not self.use_dynamic_thresholds:
             return
 
-        print("Loading static vessel data...")
+        print("Loading static vessel data with size filtering...")
 
         try:
             # Read the static vessel data CSV
@@ -219,10 +255,29 @@ class PilotBoatAssistanceAnalyzer:
             print(f"Loaded static vessel data: {len(self.static_vessel_data)} records")
 
             # Check for required columns (note: 'witdh' is the actual column name in the data)
-            if 'MMSI' in self.static_vessel_data.columns and 'witdh' in self.static_vessel_data.columns:
-                # Create a dictionary for fast lookup: MMSI -> width
+            if 'MMSI' in self.static_vessel_data.columns and 'witdh' in self.static_vessel_data.columns and 'loa' in self.static_vessel_data.columns:
+                # Apply vessel size filtering
+                print("Applying vessel size filters...")
+                original_count = len(self.static_vessel_data)
+
+                # Filter out vessels with width ≤ 2 meters or LOA < 60 meters
+                filtered_data = self.static_vessel_data[
+                    (self.static_vessel_data['witdh'] > 2) &
+                    (self.static_vessel_data['loa'] >= 60) &
+                    (pd.notna(self.static_vessel_data['witdh'])) &
+                    (pd.notna(self.static_vessel_data['loa']))
+                ]
+
+                filtered_count = len(filtered_data)
+                excluded_count = original_count - filtered_count
+                print(f"Vessel filtering results:")
+                print(f"- Original vessels: {original_count}")
+                print(f"- Vessels after filtering (width > 2m AND LOA >= 60m): {filtered_count}")
+                print(f"- Excluded vessels: {excluded_count}")
+
+                # Create a dictionary for fast lookup: MMSI -> width (only for filtered vessels)
                 self.vessel_width_lookup = {}
-                for _, row in self.static_vessel_data.iterrows():
+                for _, row in filtered_data.iterrows():
                     mmsi = row['MMSI']
                     width = row['witdh']
                     if pd.notna(width) and width > 0:
@@ -233,10 +288,16 @@ class PilotBoatAssistanceAnalyzer:
                 # Show some statistics
                 if self.vessel_width_lookup:
                     widths = list(self.vessel_width_lookup.values())
-                    print(f"Vessel width range: {min(widths):.1f}m to {max(widths):.1f}m")
-                    print(f"Average vessel width: {sum(widths)/len(widths):.1f}m")
+                    print(f"Vessel width range (filtered): {min(widths):.1f}m to {max(widths):.1f}m")
+                    print(f"Average vessel width (filtered): {sum(widths)/len(widths):.1f}m")
+
+                    # Show LOA statistics for filtered vessels
+                    loa_values = filtered_data['loa'].dropna()
+                    if not loa_values.empty:
+                        print(f"LOA range (filtered): {loa_values.min():.1f}m to {loa_values.max():.1f}m")
+                        print(f"Average LOA (filtered): {loa_values.mean():.1f}m")
             else:
-                print("Warning: Required columns (MMSI, witdh) not found in static vessel data")
+                print("Warning: Required columns (MMSI, witdh, loa) not found in static vessel data")
                 self.vessel_width_lookup = {}
 
         except Exception as e:
@@ -330,13 +391,13 @@ class PilotBoatAssistanceAnalyzer:
     
     def detect_assistance_events(self, sample_size=None):
         """
-        Detect assistance events using dynamic proximity thresholds based on vessel dimensions
-        AND course alignment validation within 45°.
+        Detect assistance events using dynamic proximity thresholds based on vessel dimensions,
+        course alignment validation within 20°, and speed similarity validation.
 
         Args:
             sample_size: If provided, only process this many rows for testing
         """
-        print("Detecting assistance events with dynamic proximity and directional validation...")
+        print("Detecting assistance events with dynamic proximity, directional, and speed validation...")
         if self.use_dynamic_thresholds:
             print("Using dynamic proximity thresholds based on vessel dimensions")
             print(f"Formula: 2 × max(pilot_boat_width, target_vessel_width)")
@@ -344,6 +405,7 @@ class PilotBoatAssistanceAnalyzer:
         else:
             print(f"Using static proximity threshold: {self.default_proximity_threshold}m")
         print(f"Course alignment threshold: ≤{self.course_alignment_threshold}°")
+        print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference ≤3 knots")
 
         # Use sample if specified
         data_to_process = self.dynamic_data
@@ -354,6 +416,7 @@ class PilotBoatAssistanceAnalyzer:
         assistance_events = []
         proximity_only_events = 0
         course_aligned_events = 0
+        speed_similar_events = 0
         total_proximity_checks = 0
 
         # Track dynamic threshold statistics
@@ -418,11 +481,26 @@ class PilotBoatAssistanceAnalyzer:
 
                         is_stationary_case = (pilot_sog < 0.5 or vessel_sog < 0.5)
 
+                        # Third check: speed similarity validation
+                        is_speed_similar, speed_diff = self.is_speed_similar(pilot_sog, vessel_sog)
+
                         # Valid assistance event if:
-                        # 1. Courses are aligned, OR
+                        # 1. Courses are aligned AND speeds are similar, OR
                         # 2. One vessel is stationary (potential boarding/disembarking)
-                        if is_aligned or is_stationary_case:
+                        if (is_aligned and is_speed_similar) or is_stationary_case:
                             course_aligned_events += 1
+                            if is_speed_similar:
+                                speed_similar_events += 1
+
+                            # Determine validation reason
+                            if is_stationary_case:
+                                validation_reason = 'stationary_vessel'
+                            elif is_aligned and is_speed_similar:
+                                validation_reason = 'course_aligned_speed_similar'
+                            elif is_aligned:
+                                validation_reason = 'course_aligned_only'
+                            else:
+                                validation_reason = 'other'
 
                             assistance_events.append({
                                 'timestamp': timestamp,
@@ -439,9 +517,11 @@ class PilotBoatAssistanceAnalyzer:
                                 'distance': distance,
                                 'proximity_threshold_used': proximity_threshold,
                                 'course_difference': course_diff,
+                                'speed_difference': speed_diff,
                                 'is_course_aligned': is_aligned,
+                                'is_speed_similar': is_speed_similar,
                                 'is_stationary_case': is_stationary_case,
-                                'validation_reason': 'course_aligned' if is_aligned else 'stationary_vessel'
+                                'validation_reason': validation_reason
                             })
 
         self.assistance_events = pd.DataFrame(assistance_events)
@@ -460,6 +540,7 @@ class PilotBoatAssistanceAnalyzer:
             print(f"- Proximity-only events (≤{self.default_proximity_threshold}m): {proximity_only_events}")
 
         print(f"- Course-aligned events (≤{self.course_alignment_threshold}°): {course_aligned_events}")
+        print(f"- Speed-similar events (5-10 knots, ≤3 knot diff): {speed_similar_events}")
         print(f"- Valid assistance events: {len(self.assistance_events)}")
 
         if proximity_only_events > 0:
@@ -479,8 +560,8 @@ class PilotBoatAssistanceAnalyzer:
     def detect_assistance_events_optimized(self, sample_size=None):
         """
         Optimized version using Polars for faster processing of large AIS datasets.
-        Detect assistance events using dynamic proximity thresholds based on vessel dimensions
-        AND course alignment validation within 45°.
+        Detect assistance events using dynamic proximity thresholds based on vessel dimensions,
+        course alignment validation within 20°, and speed similarity validation.
 
         Args:
             sample_size: If provided, only process this many rows for testing
@@ -493,6 +574,7 @@ class PilotBoatAssistanceAnalyzer:
         else:
             print(f"Using static proximity threshold: {self.default_proximity_threshold}m")
         print(f"Course alignment threshold: ≤{self.course_alignment_threshold}°")
+        print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference ≤3 knots")
 
         # Use sample if specified
         data_to_process = self.dynamic_data
@@ -516,6 +598,7 @@ class PilotBoatAssistanceAnalyzer:
         assistance_events = []
         proximity_only_events = 0
         course_aligned_events = 0
+        speed_similar_events = 0
         total_proximity_checks = 0
 
         # Track dynamic threshold statistics
@@ -573,9 +656,26 @@ class PilotBoatAssistanceAnalyzer:
                         vessel_sog_val = vessel_sog if not pd.isna(vessel_sog) else 0
                         is_stationary_case = (pilot_sog_val < 0.5 or vessel_sog_val < 0.5)
 
-                        # Valid assistance event if courses aligned or stationary case
-                        if is_aligned or is_stationary_case:
+                        # Third check: speed similarity validation
+                        is_speed_similar, speed_diff = self.is_speed_similar(pilot_sog_val, vessel_sog_val)
+
+                        # Valid assistance event if:
+                        # 1. Courses are aligned AND speeds are similar, OR
+                        # 2. One vessel is stationary (potential boarding/disembarking)
+                        if (is_aligned and is_speed_similar) or is_stationary_case:
                             course_aligned_events += 1
+                            if is_speed_similar:
+                                speed_similar_events += 1
+
+                            # Determine validation reason
+                            if is_stationary_case:
+                                validation_reason = 'stationary_vessel'
+                            elif is_aligned and is_speed_similar:
+                                validation_reason = 'course_aligned_speed_similar'
+                            elif is_aligned:
+                                validation_reason = 'course_aligned_only'
+                            else:
+                                validation_reason = 'other'
 
                             assistance_events.append({
                                 'timestamp': timestamp,
@@ -592,9 +692,11 @@ class PilotBoatAssistanceAnalyzer:
                                 'distance': distance,
                                 'proximity_threshold_used': proximity_threshold,
                                 'course_difference': course_diff,
+                                'speed_difference': speed_diff,
                                 'is_course_aligned': is_aligned,
+                                'is_speed_similar': is_speed_similar,
                                 'is_stationary_case': is_stationary_case,
-                                'validation_reason': 'course_aligned' if is_aligned else 'stationary_vessel'
+                                'validation_reason': validation_reason
                             })
 
         self.assistance_events = pd.DataFrame(assistance_events)
@@ -613,6 +715,7 @@ class PilotBoatAssistanceAnalyzer:
             print(f"- Proximity-only events (≤{self.default_proximity_threshold}m): {proximity_only_events}")
 
         print(f"- Course-aligned events (≤{self.course_alignment_threshold}°): {course_aligned_events}")
+        print(f"- Speed-similar events (5-10 knots, ≤3 knot diff): {speed_similar_events}")
         print(f"- Valid assistance events: {len(self.assistance_events)}")
 
         if proximity_only_events > 0:
@@ -707,10 +810,12 @@ class PilotBoatAssistanceAnalyzer:
 
                 # Only consider sessions longer than 1 minute
                 if duration >= 1:
-                    # Calculate course alignment statistics for the session
+                    # Calculate validation statistics for the session
                     course_aligned_count = session_data['is_course_aligned'].sum()
+                    speed_similar_count = session_data['is_speed_similar'].sum() if 'is_speed_similar' in session_data.columns else 0
                     stationary_count = session_data['is_stationary_case'].sum()
                     avg_course_diff = session_data['course_difference'].mean()
+                    avg_speed_diff = session_data['speed_difference'].mean() if 'speed_difference' in session_data.columns else np.nan
 
                     grouped_sessions.append({
                         'pilot_mmsi': pilot_mmsi,
@@ -727,9 +832,12 @@ class PilotBoatAssistanceAnalyzer:
                         'end_lat': session_data.iloc[-1]['pilot_lat'],
                         'end_lon': session_data.iloc[-1]['pilot_lon'],
                         'course_aligned_observations': course_aligned_count,
+                        'speed_similar_observations': speed_similar_count,
                         'stationary_observations': stationary_count,
                         'avg_course_difference': avg_course_diff,
+                        'avg_speed_difference': avg_speed_diff,
                         'course_alignment_ratio': course_aligned_count / len(session_data),
+                        'speed_similarity_ratio': speed_similar_count / len(session_data) if speed_similar_count > 0 else 0,
                         'primary_validation_reason': session_data['validation_reason'].mode().iloc[0] if not session_data['validation_reason'].empty else 'unknown'
                     })
 
@@ -813,9 +921,9 @@ class PilotBoatAssistanceAnalyzer:
 
     def analyze_directional_validation(self):
         """
-        Analyze the effectiveness of directional validation in filtering assistance events.
+        Analyze the effectiveness of directional and speed validation in filtering assistance events.
         """
-        print("Analyzing directional validation effectiveness...")
+        print("Analyzing directional and speed validation effectiveness...")
 
         if not hasattr(self, 'assistance_events') or self.assistance_events.empty:
             return {}
@@ -829,17 +937,27 @@ class PilotBoatAssistanceAnalyzer:
         course_aligned_events = events[events['is_course_aligned'] == True]
         stationary_events = events[events['is_stationary_case'] == True]
 
+        # Speed similarity statistics (if available)
+        speed_similar_events = events[events['is_speed_similar'] == True] if 'is_speed_similar' in events.columns else pd.DataFrame()
+
         # Course difference statistics (for non-NaN values)
         valid_course_diffs = events['course_difference'].dropna()
+
+        # Speed difference statistics (for non-NaN values)
+        valid_speed_diffs = events['speed_difference'].dropna() if 'speed_difference' in events.columns else pd.Series()
 
         analysis = {
             'total_events': len(events),
             'course_aligned_events': len(course_aligned_events),
+            'speed_similar_events': len(speed_similar_events),
             'stationary_events': len(stationary_events),
             'validation_reasons': validation_stats.to_dict(),
             'avg_course_difference': valid_course_diffs.mean() if not valid_course_diffs.empty else np.nan,
             'median_course_difference': valid_course_diffs.median() if not valid_course_diffs.empty else np.nan,
-            'course_diff_std': valid_course_diffs.std() if not valid_course_diffs.empty else np.nan
+            'course_diff_std': valid_course_diffs.std() if not valid_course_diffs.empty else np.nan,
+            'avg_speed_difference': valid_speed_diffs.mean() if not valid_speed_diffs.empty else np.nan,
+            'median_speed_difference': valid_speed_diffs.median() if not valid_speed_diffs.empty else np.nan,
+            'speed_diff_std': valid_speed_diffs.std() if not valid_speed_diffs.empty else np.nan
         }
 
         return analysis
@@ -867,17 +985,22 @@ class PilotBoatAssistanceAnalyzer:
             print(f"- Active pilot boats: {unique_pilots}")
             print(f"- Vessels assisted: {unique_vessels}")
 
-            # Directional validation analysis
+            # Directional and speed validation analysis
             validation_analysis = self.analyze_directional_validation()
             if validation_analysis:
-                print(f"\nDIRECTIONAL VALIDATION ANALYSIS:")
+                print(f"\nVALIDATION ANALYSIS:")
                 print(f"- Total validated events: {validation_analysis['total_events']}")
                 print(f"- Course-aligned events: {validation_analysis['course_aligned_events']}")
+                print(f"- Speed-similar events: {validation_analysis['speed_similar_events']}")
                 print(f"- Stationary vessel events: {validation_analysis['stationary_events']}")
 
                 if not pd.isna(validation_analysis['avg_course_difference']):
                     print(f"- Average course difference: {validation_analysis['avg_course_difference']:.1f}°")
                     print(f"- Median course difference: {validation_analysis['median_course_difference']:.1f}°")
+
+                if not pd.isna(validation_analysis['avg_speed_difference']):
+                    print(f"- Average speed difference: {validation_analysis['avg_speed_difference']:.1f} knots")
+                    print(f"- Median speed difference: {validation_analysis['median_speed_difference']:.1f} knots")
 
                 print(f"- Validation breakdown:")
                 for reason, count in validation_analysis['validation_reasons'].items():
@@ -970,7 +1093,7 @@ def main():
     Main function to run the pilot boat assistance analysis.
     """
     # File paths
-    dynamic_data_path = "Sample_data_&_trial_codes/dataSet/busan/Busan_Dynamic_20230601_sorted.csv"
+    dynamic_data_path = "Sample_data_&_trial_codes/dataSet/busan/Busan_Dynamic_20230607_sorted.csv"
     pilot_boat_excel_path = "BusanPB.xlsx"
     static_data_path = "Sample_data_&_trial_codes/dataSet/busan/Static_Busan_Dynamic_20230607.csv"
 
