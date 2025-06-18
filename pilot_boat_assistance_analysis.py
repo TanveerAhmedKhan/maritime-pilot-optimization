@@ -239,6 +239,37 @@ class PilotBoatAssistanceAnalyzer:
 
         return is_similar, speed_diff
 
+    def is_boarding_operation(self, pilot_sog, vessel_sog):
+        """
+        Check if this represents a potential boarding/disembarking operation.
+        Both vessels must be moving slowly (≤ 2 knots) indicating coordinated maneuvering.
+
+        Args:
+            pilot_sog: Pilot boat Speed Over Ground in knots
+            vessel_sog: Vessel Speed Over Ground in knots
+
+        Returns:
+            Boolean indicating if this is a potential boarding operation, and max speed
+        """
+        # Handle NaN values
+        if pd.isna(pilot_sog) or pd.isna(vessel_sog):
+            return False, np.nan
+
+        # Convert to float to ensure proper comparison
+        pilot_sog = float(pilot_sog) if not pd.isna(pilot_sog) else 0.0
+        vessel_sog = float(vessel_sog) if not pd.isna(vessel_sog) else 0.0
+
+        # Both vessels must be moving slowly for boarding operations
+        # Typical boarding speeds are < 2 knots for safety
+        pilot_slow = pilot_sog <= 2.0
+        vessel_slow = vessel_sog <= 2.0
+
+        # Both must be slow, not just one (avoids false positives)
+        is_boarding = pilot_slow and vessel_slow
+
+        max_speed = max(pilot_sog, vessel_sog)
+        return is_boarding, max_speed
+
     def load_static_vessel_data(self):
         """
         Load static vessel data containing vessel dimensions with size filtering.
@@ -348,24 +379,17 @@ class PilotBoatAssistanceAnalyzer:
             if 'MMSI' in self.pilot_boat_data.columns:
                 self.pilot_boat_mmsi = self.pilot_boat_data['MMSI'].dropna().astype(int).tolist()
             else:
-                print("MMSI column not found in pilot boat data, using default list")
-                self.pilot_boat_mmsi = self._get_default_pilot_mmsi()
+                print("MMSI column not found in pilot boat data")
+                exit(1)
                 
         except Exception as e:
             print(f"Error loading pilot boat Excel file: {e}")
             print("Using default pilot boat MMSI list")
-            self.pilot_boat_mmsi = self._get_default_pilot_mmsi()
+            exit(1)
         
         print(f"Pilot boat MMSI list: {self.pilot_boat_mmsi}")
         return self.pilot_boat_data
     
-    def _get_default_pilot_mmsi(self):
-        """Return default pilot boat MMSI list from existing codebase."""
-        return [
-            440111140, 440111150, 440111160, 440008040, 440111190,
-            440111210, 440111230, 440110850, 440127410, 440135830,
-            440155330, 440105210, 440121630
-        ]
     
     def load_dynamic_data(self):
         """Load and prepare dynamic AIS data."""
@@ -406,6 +430,7 @@ class PilotBoatAssistanceAnalyzer:
             print(f"Using static proximity threshold: {self.default_proximity_threshold}m")
         print(f"Course alignment threshold: ≤{self.course_alignment_threshold}°")
         print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference ≤3 knots")
+        print(f"Boarding operation detection: Both vessels ≤2 knots (replaces old stationary logic)")
 
         # Use sample if specified
         data_to_process = self.dynamic_data
@@ -441,6 +466,7 @@ class PilotBoatAssistanceAnalyzer:
 
             # Skip if no pilot boats at this time
             if len(pilot_boats) == 0:
+                print(f"Warning: No pilot boats at timestamp {timestamp}")
                 continue
 
             # Check proximity and course alignment between each pilot boat and other vessels
@@ -473,28 +499,29 @@ class PilotBoatAssistanceAnalyzer:
                         pilot_sog = pilot.get('SOG', 0)
                         vessel_sog = vessel.get('SOG', 0)
 
-                        # Consider stationary vessels (SOG < 0.5 knots) as potential assistance cases
+                        # Handle missing speed data
                         if pd.isna(pilot_sog):
                             pilot_sog = 0
                         if pd.isna(vessel_sog):
                             vessel_sog = 0
 
-                        is_stationary_case = (pilot_sog < 0.5 or vessel_sog < 0.5)
-
                         # Third check: speed similarity validation
                         is_speed_similar, speed_diff = self.is_speed_similar(pilot_sog, vessel_sog)
 
+                        # Fourth check: boarding operation detection (both vessels slow)
+                        is_boarding_op, max_speed = self.is_boarding_operation(pilot_sog, vessel_sog)
+
                         # Valid assistance event if:
-                        # 1. Courses are aligned AND speeds are similar, OR
-                        # 2. One vessel is stationary (potential boarding/disembarking)
-                        if (is_aligned and is_speed_similar) or is_stationary_case:
+                        # 1. Courses are aligned AND speeds are similar (active assistance), OR
+                        # 2. Both vessels are slow (≤ 2 knots) indicating boarding/disembarking
+                        if (is_aligned and is_speed_similar) or is_boarding_op:
                             course_aligned_events += 1
                             if is_speed_similar:
                                 speed_similar_events += 1
 
                             # Determine validation reason
-                            if is_stationary_case:
-                                validation_reason = 'stationary_vessel'
+                            if is_boarding_op:
+                                validation_reason = 'boarding_operation'
                             elif is_aligned and is_speed_similar:
                                 validation_reason = 'course_aligned_speed_similar'
                             elif is_aligned:
@@ -518,9 +545,10 @@ class PilotBoatAssistanceAnalyzer:
                                 'proximity_threshold_used': proximity_threshold,
                                 'course_difference': course_diff,
                                 'speed_difference': speed_diff,
+                                'max_speed_in_pair': max_speed,
                                 'is_course_aligned': is_aligned,
                                 'is_speed_similar': is_speed_similar,
-                                'is_stationary_case': is_stationary_case,
+                                'is_boarding_operation': is_boarding_op,
                                 'validation_reason': validation_reason
                             })
 
@@ -575,6 +603,7 @@ class PilotBoatAssistanceAnalyzer:
             print(f"Using static proximity threshold: {self.default_proximity_threshold}m")
         print(f"Course alignment threshold: ≤{self.course_alignment_threshold}°")
         print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference ≤3 knots")
+        print(f"Boarding operation detection: Both vessels ≤2 knots (replaces old stationary logic)")
 
         # Use sample if specified
         data_to_process = self.dynamic_data
@@ -619,6 +648,7 @@ class PilotBoatAssistanceAnalyzer:
             other_vessels = vessels_at_time.filter(pl.col("IsPilotBoat") == False)
 
             if len(pilot_boats) == 0:
+                print(f"Warning: No pilot boats at timestamp {timestamp}")
                 continue
 
             # Convert to numpy arrays for vectorized distance calculations
@@ -651,25 +681,27 @@ class PilotBoatAssistanceAnalyzer:
 
                         is_aligned, course_diff = self.is_course_aligned(pilot_course, vessel_course)
 
-                        # Handle stationary vessels
+                        # Handle missing speed data
                         pilot_sog_val = pilot_sog if not pd.isna(pilot_sog) else 0
                         vessel_sog_val = vessel_sog if not pd.isna(vessel_sog) else 0
-                        is_stationary_case = (pilot_sog_val < 0.5 or vessel_sog_val < 0.5)
 
                         # Third check: speed similarity validation
                         is_speed_similar, speed_diff = self.is_speed_similar(pilot_sog_val, vessel_sog_val)
 
+                        # Fourth check: boarding operation detection (both vessels slow)
+                        is_boarding_op, max_speed = self.is_boarding_operation(pilot_sog_val, vessel_sog_val)
+
                         # Valid assistance event if:
-                        # 1. Courses are aligned AND speeds are similar, OR
-                        # 2. One vessel is stationary (potential boarding/disembarking)
-                        if (is_aligned and is_speed_similar) or is_stationary_case:
+                        # 1. Courses are aligned AND speeds are similar (active assistance), OR
+                        # 2. Both vessels are slow (≤ 2 knots) indicating boarding/disembarking
+                        if (is_aligned and is_speed_similar) or is_boarding_op:
                             course_aligned_events += 1
                             if is_speed_similar:
                                 speed_similar_events += 1
 
                             # Determine validation reason
-                            if is_stationary_case:
-                                validation_reason = 'stationary_vessel'
+                            if is_boarding_op:
+                                validation_reason = 'boarding_operation'
                             elif is_aligned and is_speed_similar:
                                 validation_reason = 'course_aligned_speed_similar'
                             elif is_aligned:
@@ -693,9 +725,10 @@ class PilotBoatAssistanceAnalyzer:
                                 'proximity_threshold_used': proximity_threshold,
                                 'course_difference': course_diff,
                                 'speed_difference': speed_diff,
+                                'max_speed_in_pair': max_speed,
                                 'is_course_aligned': is_aligned,
                                 'is_speed_similar': is_speed_similar,
-                                'is_stationary_case': is_stationary_case,
+                                'is_boarding_operation': is_boarding_op,
                                 'validation_reason': validation_reason
                             })
 
@@ -813,9 +846,10 @@ class PilotBoatAssistanceAnalyzer:
                     # Calculate validation statistics for the session
                     course_aligned_count = session_data['is_course_aligned'].sum()
                     speed_similar_count = session_data['is_speed_similar'].sum() if 'is_speed_similar' in session_data.columns else 0
-                    stationary_count = session_data['is_stationary_case'].sum()
+                    boarding_op_count = session_data['is_boarding_operation'].sum() if 'is_boarding_operation' in session_data.columns else 0
                     avg_course_diff = session_data['course_difference'].mean()
                     avg_speed_diff = session_data['speed_difference'].mean() if 'speed_difference' in session_data.columns else np.nan
+                    avg_max_speed = session_data['max_speed_in_pair'].mean() if 'max_speed_in_pair' in session_data.columns else np.nan
 
                     grouped_sessions.append({
                         'pilot_mmsi': pilot_mmsi,
@@ -833,11 +867,13 @@ class PilotBoatAssistanceAnalyzer:
                         'end_lon': session_data.iloc[-1]['pilot_lon'],
                         'course_aligned_observations': course_aligned_count,
                         'speed_similar_observations': speed_similar_count,
-                        'stationary_observations': stationary_count,
+                        'boarding_operation_observations': boarding_op_count,
                         'avg_course_difference': avg_course_diff,
                         'avg_speed_difference': avg_speed_diff,
+                        'avg_max_speed_in_pair': avg_max_speed,
                         'course_alignment_ratio': course_aligned_count / len(session_data),
                         'speed_similarity_ratio': speed_similar_count / len(session_data) if speed_similar_count > 0 else 0,
+                        'boarding_operation_ratio': boarding_op_count / len(session_data) if boarding_op_count > 0 else 0,
                         'primary_validation_reason': session_data['validation_reason'].mode().iloc[0] if not session_data['validation_reason'].empty else 'unknown'
                     })
 
@@ -935,7 +971,7 @@ class PilotBoatAssistanceAnalyzer:
 
         # Course alignment statistics
         course_aligned_events = events[events['is_course_aligned'] == True]
-        stationary_events = events[events['is_stationary_case'] == True]
+        boarding_op_events = events[events['is_boarding_operation'] == True] if 'is_boarding_operation' in events.columns else pd.DataFrame()
 
         # Speed similarity statistics (if available)
         speed_similar_events = events[events['is_speed_similar'] == True] if 'is_speed_similar' in events.columns else pd.DataFrame()
@@ -950,7 +986,7 @@ class PilotBoatAssistanceAnalyzer:
             'total_events': len(events),
             'course_aligned_events': len(course_aligned_events),
             'speed_similar_events': len(speed_similar_events),
-            'stationary_events': len(stationary_events),
+            'boarding_operation_events': len(boarding_op_events),
             'validation_reasons': validation_stats.to_dict(),
             'avg_course_difference': valid_course_diffs.mean() if not valid_course_diffs.empty else np.nan,
             'median_course_difference': valid_course_diffs.median() if not valid_course_diffs.empty else np.nan,
@@ -992,7 +1028,7 @@ class PilotBoatAssistanceAnalyzer:
                 print(f"- Total validated events: {validation_analysis['total_events']}")
                 print(f"- Course-aligned events: {validation_analysis['course_aligned_events']}")
                 print(f"- Speed-similar events: {validation_analysis['speed_similar_events']}")
-                print(f"- Stationary vessel events: {validation_analysis['stationary_events']}")
+                print(f"- Boarding operation events: {validation_analysis['boarding_operation_events']}")
 
                 if not pd.isna(validation_analysis['avg_course_difference']):
                     print(f"- Average course difference: {validation_analysis['avg_course_difference']:.1f}°")
@@ -1093,9 +1129,9 @@ def main():
     Main function to run the pilot boat assistance analysis.
     """
     # File paths
-    dynamic_data_path = "Sample_data_&_trial_codes/dataSet/busan/Busan_Dynamic_20230607_sorted.csv"
+    dynamic_data_path = "Sample_data_&_trial_codes/dataSet/busan/Busan_Dynamic_20230601_sorted.csv"
     pilot_boat_excel_path = "BusanPB.xlsx"
-    static_data_path = "Sample_data_&_trial_codes/dataSet/busan/Static_Busan_Dynamic_20230607.csv"
+    static_data_path = "Sample_data_&_trial_codes/dataSet/busan/Static_Busan_Dynamic_20230601.csv"
 
     # Create analyzer instance with dynamic thresholds
     analyzer = PilotBoatAssistanceAnalyzer(dynamic_data_path, pilot_boat_excel_path, static_data_path)
