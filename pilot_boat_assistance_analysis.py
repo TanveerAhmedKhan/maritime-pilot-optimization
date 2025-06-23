@@ -242,7 +242,8 @@ class PilotBoatAssistanceAnalyzer:
     def is_boarding_operation(self, pilot_sog, vessel_sog):
         """
         Check if this represents a potential boarding/disembarking operation.
-        Both vessels must be moving slowly (≤ 2 knots) indicating coordinated maneuvering.
+        Both vessels must be moving slowly (≤ 2 knots) but NOT completely stationary,
+        indicating coordinated maneuvering rather than anchored vessels.
 
         Args:
             pilot_sog: Pilot boat Speed Over Ground in knots
@@ -259,13 +260,21 @@ class PilotBoatAssistanceAnalyzer:
         pilot_sog = float(pilot_sog) if not pd.isna(pilot_sog) else 0.0
         vessel_sog = float(vessel_sog) if not pd.isna(vessel_sog) else 0.0
 
+        # Exclude completely stationary vessels (likely anchored)
+        # At least one vessel must have some movement (> 0.3 knots) to indicate active operation
+        min_movement_threshold = 0.3  # knots
+        has_movement = (pilot_sog > min_movement_threshold) or (vessel_sog > min_movement_threshold)
+
+        if not has_movement:
+            return False, max(pilot_sog, vessel_sog)
+
         # Both vessels must be moving slowly for boarding operations
-        # Typical boarding speeds are < 2 knots for safety
+        # Typical boarding speeds are ≤ 2 knots for safety
         pilot_slow = pilot_sog <= 2.0
         vessel_slow = vessel_sog <= 2.0
 
-        # Both must be slow, not just one (avoids false positives)
-        is_boarding = pilot_slow and vessel_slow
+        # Both must be slow, and at least one must show movement
+        is_boarding = pilot_slow and vessel_slow and has_movement
 
         max_speed = max(pilot_sog, vessel_sog)
         return is_boarding, max_speed
@@ -430,7 +439,7 @@ class PilotBoatAssistanceAnalyzer:
             print(f"Using static proximity threshold: {self.default_proximity_threshold}m")
         print(f"Course alignment threshold: ≤{self.course_alignment_threshold}°")
         print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference ≤3 knots")
-        print(f"Boarding operation detection: Both vessels ≤2 knots (replaces old stationary logic)")
+        print(f"Boarding operation detection: Both vessels ≤2 knots + recent movement validation")
 
         # Use sample if specified
         data_to_process = self.dynamic_data
@@ -511,9 +520,18 @@ class PilotBoatAssistanceAnalyzer:
                         # Fourth check: boarding operation detection (both vessels slow)
                         is_boarding_op, max_speed = self.is_boarding_operation(pilot_sog, vessel_sog)
 
+                        # Fifth check: movement validation for boarding operations
+                        if is_boarding_op:
+                            # Verify that at least one vessel has shown recent movement
+                            pilot_has_movement = self.has_recent_movement(pilot['MMSI'], timestamp)
+                            vessel_has_movement = self.has_recent_movement(vessel['MMSI'], timestamp)
+
+                            # Only consider it a boarding operation if there's evidence of recent movement
+                            is_boarding_op = is_boarding_op and (pilot_has_movement or vessel_has_movement)
+
                         # Valid assistance event if:
                         # 1. Courses are aligned AND speeds are similar (active assistance), OR
-                        # 2. Both vessels are slow (≤ 2 knots) indicating boarding/disembarking
+                        # 2. Both vessels are slow AND have recent movement (boarding/disembarking)
                         if (is_aligned and is_speed_similar) or is_boarding_op:
                             course_aligned_events += 1
                             if is_speed_similar:
@@ -603,7 +621,7 @@ class PilotBoatAssistanceAnalyzer:
             print(f"Using static proximity threshold: {self.default_proximity_threshold}m")
         print(f"Course alignment threshold: ≤{self.course_alignment_threshold}°")
         print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference ≤3 knots")
-        print(f"Boarding operation detection: Both vessels ≤2 knots (replaces old stationary logic)")
+        print(f"Boarding operation detection: Both vessels ≤2 knots + recent movement validation")
 
         # Use sample if specified
         data_to_process = self.dynamic_data
@@ -691,9 +709,18 @@ class PilotBoatAssistanceAnalyzer:
                         # Fourth check: boarding operation detection (both vessels slow)
                         is_boarding_op, max_speed = self.is_boarding_operation(pilot_sog_val, vessel_sog_val)
 
+                        # Fifth check: movement validation for boarding operations
+                        if is_boarding_op:
+                            # Verify that at least one vessel has shown recent movement
+                            pilot_has_movement = self.has_recent_movement(pilot_mmsi, timestamp)
+                            vessel_has_movement = self.has_recent_movement(vessel_mmsi, timestamp)
+
+                            # Only consider it a boarding operation if there's evidence of recent movement
+                            is_boarding_op = is_boarding_op and (pilot_has_movement or vessel_has_movement)
+
                         # Valid assistance event if:
                         # 1. Courses are aligned AND speeds are similar (active assistance), OR
-                        # 2. Both vessels are slow (≤ 2 knots) indicating boarding/disembarking
+                        # 2. Both vessels are slow AND have recent movement (boarding/disembarking)
                         if (is_aligned and is_speed_similar) or is_boarding_op:
                             course_aligned_events += 1
                             if is_speed_similar:
@@ -812,11 +839,117 @@ class PilotBoatAssistanceAnalyzer:
 
         return np.nan
 
+    def has_recent_movement(self, mmsi, current_time, lookback_minutes=10):
+        """
+        Check if a vessel has shown movement in the recent past.
+        This helps distinguish between actively maneuvering vessels and anchored vessels.
+
+        Args:
+            mmsi: MMSI of the vessel to check
+            current_time: Current timestamp
+            lookback_minutes: How many minutes back to check for movement
+
+        Returns:
+            Boolean indicating if vessel has moved recently
+        """
+        if self.dynamic_data is None or self.dynamic_data.empty:
+            return False
+
+        # Define time window for checking recent movement
+        start_time = current_time - pd.Timedelta(minutes=lookback_minutes)
+
+        # Get vessel data in the time window
+        vessel_history = self.dynamic_data[
+            (self.dynamic_data['MMSI'] == mmsi) &
+            (self.dynamic_data['DateTime'] >= start_time) &
+            (self.dynamic_data['DateTime'] <= current_time)
+        ].sort_values('DateTime')
+
+        if len(vessel_history) < 2:
+            return False  # Need at least 2 points to check movement
+
+        # Check for significant movement in position or speed variation
+        lat_range = vessel_history['Latitude'].max() - vessel_history['Latitude'].min()
+        lon_range = vessel_history['Longitude'].max() - vessel_history['Longitude'].min()
+
+        # Convert to approximate meters (rough calculation)
+        lat_movement = lat_range * 111000  # meters
+        lon_movement = lon_range * 111000 * np.cos(np.radians(vessel_history['Latitude'].mean()))
+        total_movement = np.sqrt(lat_movement**2 + lon_movement**2)
+
+        # Check for speed variation (indicates active maneuvering vs anchored)
+        if 'SOG' in vessel_history.columns:
+            speed_variation = vessel_history['SOG'].std()
+            max_speed = vessel_history['SOG'].max()
+
+            # Consider vessel as moving if:
+            # 1. Total position change > 50 meters, OR
+            # 2. Speed variation > 0.5 knots (indicating maneuvering), OR
+            # 3. Maximum speed > 1.0 knots in the period
+            has_movement = (total_movement > 50) or (speed_variation > 0.5) or (max_speed > 1.0)
+        else:
+            # Fallback to position change only
+            has_movement = total_movement > 50
+
+        return has_movement
+
+    def _extract_trajectory_data(self, mmsi, start_time, end_time):
+        """
+        Extract complete trajectory data for a vessel between start and end times.
+
+        Args:
+            mmsi: MMSI of the vessel
+            start_time: Start timestamp for trajectory extraction
+            end_time: End timestamp for trajectory extraction
+
+        Returns:
+            List of [timestamp, latitude, longitude] points for the vessel
+        """
+        if self.dynamic_data is None or self.dynamic_data.empty:
+            return []
+
+        # Filter data for the specific vessel and time range
+        vessel_trajectory = self.dynamic_data[
+            (self.dynamic_data['MMSI'] == mmsi) &
+            (self.dynamic_data['DateTime'] >= start_time) &
+            (self.dynamic_data['DateTime'] <= end_time)
+        ].sort_values('DateTime')
+
+        # Extract trajectory points as list of [timestamp, lat, lon]
+        trajectory_points = []
+        for _, row in vessel_trajectory.iterrows():
+            if pd.notna(row['Latitude']) and pd.notna(row['Longitude']):
+                trajectory_points.append([
+                    row['DateTime'].isoformat(),  # Convert to ISO string for JSON serialization
+                    float(row['Latitude']),
+                    float(row['Longitude'])
+                ])
+
+        return trajectory_points
+
     def group_continuous_events(self):
         """
-        Group continuous proximity events into assistance sessions.
+        Group continuous proximity events into assistance sessions with complete trajectory data.
+
+        This method enhances the original session grouping by including complete trajectory
+        data for both pilot boat and target vessel throughout each assistance session.
+
+        New features:
+        - Extracts complete position sequences for both vessels during each session
+        - Includes all intermediate waypoints between session start and end times
+        - Adds trajectory statistics (total points, points per vessel)
+        - Preserves all existing session statistics and validation metrics
+
+        Returns:
+            DataFrame with enhanced session data including:
+            - pilot_trajectory: List of [timestamp, lat, lon] points for pilot boat
+            - vessel_trajectory: List of [timestamp, lat, lon] points for target vessel
+            - trajectory_points: Total number of position observations
+            - pilot_trajectory_points: Number of pilot boat trajectory points
+            - vessel_trajectory_points: Number of target vessel trajectory points
+            - All existing session statistics (duration, distance, validation metrics)
         """
-        print("Grouping continuous assistance events...")
+        print("Grouping continuous assistance events with trajectory extraction...")
 
         if self.assistance_events.empty:
             print("No assistance events to group")
@@ -843,6 +976,12 @@ class PilotBoatAssistanceAnalyzer:
 
                 # Only consider sessions longer than 1 minute
                 if duration >= 1:
+                    print(f"Extracting trajectory data for session: Pilot {pilot_mmsi} - Vessel {vessel_mmsi} ({start_time} to {end_time})")
+
+                    # Extract complete trajectory data for both vessels
+                    pilot_trajectory = self._extract_trajectory_data(pilot_mmsi, start_time, end_time)
+                    vessel_trajectory = self._extract_trajectory_data(vessel_mmsi, start_time, end_time)
+
                     # Calculate validation statistics for the session
                     course_aligned_count = session_data['is_course_aligned'].sum()
                     speed_similar_count = session_data['is_speed_similar'].sum() if 'is_speed_similar' in session_data.columns else 0
@@ -874,7 +1013,13 @@ class PilotBoatAssistanceAnalyzer:
                         'course_alignment_ratio': course_aligned_count / len(session_data),
                         'speed_similarity_ratio': speed_similar_count / len(session_data) if speed_similar_count > 0 else 0,
                         'boarding_operation_ratio': boarding_op_count / len(session_data) if boarding_op_count > 0 else 0,
-                        'primary_validation_reason': session_data['validation_reason'].mode().iloc[0] if not session_data['validation_reason'].empty else 'unknown'
+                        'primary_validation_reason': session_data['validation_reason'].mode().iloc[0] if not session_data['validation_reason'].empty else 'unknown',
+                        # Complete trajectory data
+                        'pilot_trajectory': pilot_trajectory,
+                        'vessel_trajectory': vessel_trajectory,
+                        'trajectory_points': len(pilot_trajectory) + len(vessel_trajectory),
+                        'pilot_trajectory_points': len(pilot_trajectory),
+                        'vessel_trajectory_points': len(vessel_trajectory)
                     })
 
         self.assistance_sessions = pd.DataFrame(grouped_sessions)
@@ -1109,8 +1254,41 @@ class PilotBoatAssistanceAnalyzer:
             print("Saved proximity events to: pilot_boat_proximity_events.csv")
 
         if hasattr(self, 'assistance_sessions') and not self.assistance_sessions.empty:
-            self.assistance_sessions.to_csv('pilot_boat_assistance_sessions.csv', index=False)
+            # Create a copy for CSV export (trajectory data needs special handling)
+            sessions_for_csv = self.assistance_sessions.copy()
+
+            # Convert trajectory data to JSON strings for CSV compatibility
+            if 'pilot_trajectory' in sessions_for_csv.columns:
+                sessions_for_csv['pilot_trajectory'] = sessions_for_csv['pilot_trajectory'].apply(
+                    lambda x: str(x) if x else '[]'
+                )
+            if 'vessel_trajectory' in sessions_for_csv.columns:
+                sessions_for_csv['vessel_trajectory'] = sessions_for_csv['vessel_trajectory'].apply(
+                    lambda x: str(x) if x else '[]'
+                )
+
+            sessions_for_csv.to_csv('pilot_boat_assistance_sessions.csv', index=False)
             print("Saved assistance sessions to: pilot_boat_assistance_sessions.csv")
+
+            # Save trajectory data separately in JSON format for better usability
+            import json
+            trajectory_data = {}
+            for idx, row in self.assistance_sessions.iterrows():
+                session_key = f"pilot_{row['pilot_mmsi']}_vessel_{row['vessel_mmsi']}_session_{idx}"
+                trajectory_data[session_key] = {
+                    'pilot_mmsi': row['pilot_mmsi'],
+                    'vessel_mmsi': row['vessel_mmsi'],
+                    'start_time': row['start_time'].isoformat(),
+                    'end_time': row['end_time'].isoformat(),
+                    'duration_minutes': row['duration_minutes'],
+                    'pilot_trajectory': row.get('pilot_trajectory', []),
+                    'vessel_trajectory': row.get('vessel_trajectory', []),
+                    'trajectory_points': row.get('trajectory_points', 0)
+                }
+
+            with open('pilot_boat_trajectories.json', 'w') as f:
+                json.dump(trajectory_data, f, indent=2)
+            print("Saved trajectory data to: pilot_boat_trajectories.json")
 
             # Save analysis summaries
             pilot_performance = self.analyze_pilot_boat_performance()
