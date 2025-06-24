@@ -139,6 +139,62 @@ class PilotBoatAssistanceAnalyzer:
 
         return diff
 
+    def classify_traffic_direction(self, heading):
+        """
+        Classify vessel traffic direction based on heading patterns.
+
+        Args:
+            heading: Vessel heading in degrees (0-360)
+
+        Returns:
+            String: "inbound", "outbound", or "other"
+        """
+        if pd.isna(heading):
+            return "nan"
+
+        # Normalize heading to 0-360 range
+        heading = heading % 360
+
+        # Inbound traffic: 324° to 354° (339° ± 15°) - toward port/northwest
+        # This is a simple range that does NOT wrap around 0°
+        if 324 <= heading <= 354:
+            return "inbound"
+
+        # Outbound traffic: 148° to 178° (163° ± 15°) - away from port/southeast
+        if 148 <= heading <= 178:
+            return "outbound"
+
+        # All other headings
+        return "other"
+
+    def get_primary_traffic_direction(self, directions_list):
+        """
+        Determine the primary traffic direction from a list of directions.
+
+        Args:
+            directions_list: List of traffic direction strings
+
+        Returns:
+            String: Most common direction, or "mixed" if tie
+        """
+        if not directions_list:
+            return "other"
+
+        # Count occurrences of each direction
+        direction_counts = {}
+        for direction in directions_list:
+            direction_counts[direction] = direction_counts.get(direction, 0) + 1
+
+        # Find the most common direction
+        max_count = max(direction_counts.values())
+        most_common = [direction for direction, count in direction_counts.items() if count == max_count]
+
+        # Return single direction or "mixed" if tie
+        if len(most_common) == 1:
+            return most_common[0]
+        else:
+            return "mixed"
+
     def get_vessel_course(self, vessel_data, mmsi, timestamp):
         """
         Get the course for a vessel, using COG if available or calculating from position history.
@@ -547,6 +603,10 @@ class PilotBoatAssistanceAnalyzer:
                             else:
                                 validation_reason = 'other'
 
+                            # Classify traffic direction based on vessel heading
+                            vessel_traffic_direction = self.classify_traffic_direction(vessel_course)
+                            pilot_traffic_direction = self.classify_traffic_direction(pilot_course)
+
                             assistance_events.append({
                                 'timestamp': timestamp,
                                 'pilot_mmsi': pilot['MMSI'],
@@ -567,7 +627,9 @@ class PilotBoatAssistanceAnalyzer:
                                 'is_course_aligned': is_aligned,
                                 'is_speed_similar': is_speed_similar,
                                 'is_boarding_operation': is_boarding_op,
-                                'validation_reason': validation_reason
+                                'validation_reason': validation_reason,
+                                'traffic_direction': vessel_traffic_direction,
+                                'pilot_traffic_direction': pilot_traffic_direction
                             })
 
         self.assistance_events = pd.DataFrame(assistance_events)
@@ -736,6 +798,10 @@ class PilotBoatAssistanceAnalyzer:
                             else:
                                 validation_reason = 'other'
 
+                            # Classify traffic direction based on vessel heading
+                            vessel_traffic_direction = self.classify_traffic_direction(vessel_course)
+                            pilot_traffic_direction = self.classify_traffic_direction(pilot_course)
+
                             assistance_events.append({
                                 'timestamp': timestamp,
                                 'pilot_mmsi': pilot_mmsi,
@@ -756,7 +822,9 @@ class PilotBoatAssistanceAnalyzer:
                                 'is_course_aligned': is_aligned,
                                 'is_speed_similar': is_speed_similar,
                                 'is_boarding_operation': is_boarding_op,
-                                'validation_reason': validation_reason
+                                'validation_reason': validation_reason,
+                                'traffic_direction': vessel_traffic_direction,
+                                'pilot_traffic_direction': pilot_traffic_direction
                             })
 
         self.assistance_events = pd.DataFrame(assistance_events)
@@ -990,6 +1058,10 @@ class PilotBoatAssistanceAnalyzer:
                     avg_speed_diff = session_data['speed_difference'].mean() if 'speed_difference' in session_data.columns else np.nan
                     avg_max_speed = session_data['max_speed_in_pair'].mean() if 'max_speed_in_pair' in session_data.columns else np.nan
 
+                    # Calculate traffic direction statistics
+                    traffic_directions = session_data['traffic_direction'].tolist() if 'traffic_direction' in session_data.columns else []
+                    primary_traffic_direction = self.get_primary_traffic_direction(traffic_directions)
+
                     grouped_sessions.append({
                         'pilot_mmsi': pilot_mmsi,
                         'vessel_mmsi': vessel_mmsi,
@@ -1014,6 +1086,7 @@ class PilotBoatAssistanceAnalyzer:
                         'speed_similarity_ratio': speed_similar_count / len(session_data) if speed_similar_count > 0 else 0,
                         'boarding_operation_ratio': boarding_op_count / len(session_data) if boarding_op_count > 0 else 0,
                         'primary_validation_reason': session_data['validation_reason'].mode().iloc[0] if not session_data['validation_reason'].empty else 'unknown',
+                        'primary_traffic_direction': primary_traffic_direction,
                         # Complete trajectory data
                         'pilot_trajectory': pilot_trajectory,
                         'vessel_trajectory': vessel_trajectory,
@@ -1103,6 +1176,7 @@ class PilotBoatAssistanceAnalyzer:
     def analyze_directional_validation(self):
         """
         Analyze the effectiveness of directional and speed validation in filtering assistance events.
+        Enhanced with traffic flow analysis.
         """
         print("Analyzing directional and speed validation effectiveness...")
 
@@ -1127,6 +1201,18 @@ class PilotBoatAssistanceAnalyzer:
         # Speed difference statistics (for non-NaN values)
         valid_speed_diffs = events['speed_difference'].dropna() if 'speed_difference' in events.columns else pd.Series()
 
+        # Traffic flow analysis
+        traffic_flow_stats = {}
+        if 'traffic_direction' in events.columns:
+            traffic_flow_stats = events['traffic_direction'].value_counts().to_dict()
+
+            # Analyze traffic flow by validation reason
+            traffic_by_validation = {}
+            for reason in events['validation_reason'].unique():
+                reason_events = events[events['validation_reason'] == reason]
+                if not reason_events.empty and 'traffic_direction' in reason_events.columns:
+                    traffic_by_validation[reason] = reason_events['traffic_direction'].value_counts().to_dict()
+
         analysis = {
             'total_events': len(events),
             'course_aligned_events': len(course_aligned_events),
@@ -1138,7 +1224,9 @@ class PilotBoatAssistanceAnalyzer:
             'course_diff_std': valid_course_diffs.std() if not valid_course_diffs.empty else np.nan,
             'avg_speed_difference': valid_speed_diffs.mean() if not valid_speed_diffs.empty else np.nan,
             'median_speed_difference': valid_speed_diffs.median() if not valid_speed_diffs.empty else np.nan,
-            'speed_diff_std': valid_speed_diffs.std() if not valid_speed_diffs.empty else np.nan
+            'speed_diff_std': valid_speed_diffs.std() if not valid_speed_diffs.empty else np.nan,
+            'traffic_flow_distribution': traffic_flow_stats,
+            'traffic_flow_by_validation': traffic_by_validation if 'traffic_direction' in events.columns else {}
         }
 
         return analysis
@@ -1187,6 +1275,22 @@ class PilotBoatAssistanceAnalyzer:
                 for reason, count in validation_analysis['validation_reasons'].items():
                     percentage = (count / validation_analysis['total_events']) * 100
                     print(f"  • {reason}: {count} ({percentage:.1f}%)")
+
+                # Traffic flow analysis
+                if validation_analysis.get('traffic_flow_distribution'):
+                    print(f"\n- Traffic flow distribution:")
+                    for direction, count in validation_analysis['traffic_flow_distribution'].items():
+                        percentage = (count / validation_analysis['total_events']) * 100
+                        print(f"  • {direction.capitalize()}: {count} events ({percentage:.1f}%)")
+
+                # Traffic flow by validation reason
+                if validation_analysis.get('traffic_flow_by_validation'):
+                    print(f"\n- Traffic flow by validation reason:")
+                    for reason, traffic_dist in validation_analysis['traffic_flow_by_validation'].items():
+                        if traffic_dist:  # Only show if there's data
+                            print(f"  • {reason}:")
+                            for direction, count in traffic_dist.items():
+                                print(f"    - {direction}: {count} events")
 
             # Pilot boat performance
             pilot_performance = self.analyze_pilot_boat_performance()
@@ -1281,6 +1385,7 @@ class PilotBoatAssistanceAnalyzer:
                     'start_time': row['start_time'].isoformat(),
                     'end_time': row['end_time'].isoformat(),
                     'duration_minutes': row['duration_minutes'],
+                    'primary_traffic_direction': row.get('primary_traffic_direction', 'unknown'),
                     'pilot_trajectory': row.get('pilot_trajectory', []),
                     'vessel_trajectory': row.get('vessel_trajectory', []),
                     'trajectory_points': row.get('trajectory_points', 0)
