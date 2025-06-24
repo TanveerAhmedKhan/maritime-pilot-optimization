@@ -139,12 +139,18 @@ class PilotBoatAssistanceAnalyzer:
 
         return diff
 
-    def classify_traffic_direction(self, heading):
+    def classify_traffic_direction(self, heading, speed=None, course_alignment=None,
+                                 distance=None, validation_reason=None, pilot_heading=None):
         """
-        Classify vessel traffic direction based on heading patterns.
+        Enhanced traffic direction classification with adaptive ranges and context awareness.
 
         Args:
             heading: Vessel heading in degrees (0-360)
+            speed: Vessel speed in knots (optional, for context)
+            course_alignment: Boolean indicating course alignment (optional)
+            distance: Distance to pilot boat in meters (optional)
+            validation_reason: Validation reason from proximity detection (optional)
+            pilot_heading: Pilot boat heading for additional context (optional)
 
         Returns:
             String: "inbound", "outbound", or "other"
@@ -155,17 +161,96 @@ class PilotBoatAssistanceAnalyzer:
         # Normalize heading to 0-360 range
         heading = heading % 360
 
-        # Inbound traffic: 324° to 354° (339° ± 15°) - toward port/northwest
-        # This is a simple range that does NOT wrap around 0°
+        # Core ranges (high confidence classifications)
+
+        # Core inbound: 324° to 354° (original range - high confidence)
         if 324 <= heading <= 354:
             return "inbound"
 
-        # Outbound traffic: 148° to 178° (163° ± 15°) - away from port/southeast
+        # Core outbound: 148° to 178° (original range - high confidence)
         if 148 <= heading <= 178:
             return "outbound"
 
-        # All other headings
+        # Extended ranges with context validation (based on analysis)
+
+        # Extended inbound: 314°-323° and 355°-10°
+        if ((314 <= heading < 324) or (355 <= heading <= 360) or (0 <= heading <= 10)):
+            # Require additional validation for extended ranges
+            if self._validate_inbound_context(speed, course_alignment, distance, validation_reason):
+                return "inbound"
+
+        # Extended outbound: 135°-147° and 179°-190°
+        if (135 <= heading < 148) or (179 <= heading <= 190):
+            # Require additional validation for extended ranges
+            if self._validate_outbound_context(speed, course_alignment, distance, validation_reason):
+                return "outbound"
+
+        # Contextual classification for coordinated movements
+        if (speed is not None and course_alignment is not None and
+            validation_reason is not None and course_alignment):
+
+            # Strong indicators of coordinated movement
+            if validation_reason == 'course_aligned_speed_similar':
+
+                # Northwest quadrant (270°-90°) - likely inbound if coordinated
+                if (270 <= heading <= 360) or (0 <= heading <= 90):
+                    return "inbound"
+
+                # Southeast quadrant (90°-270°) - likely outbound if coordinated
+                if 90 <= heading <= 270:
+                    return "outbound"
+
+            # Boarding operations with directional hints
+            if validation_reason == 'boarding_operation' and pilot_heading is not None:
+                pilot_heading = pilot_heading % 360 if not pd.isna(pilot_heading) else None
+
+                if pilot_heading is not None:
+                    # If pilot is in inbound range, vessel likely inbound too
+                    if ((314 <= pilot_heading <= 360) or (0 <= pilot_heading <= 30)):
+                        if (270 <= heading <= 360) or (0 <= heading <= 120):
+                            return "inbound"
+
+                    # If pilot is in outbound range, vessel likely outbound too
+                    if 120 <= pilot_heading <= 240:
+                        if 90 <= heading <= 270:
+                            return "outbound"
+
+        # Default classification
         return "other"
+
+    def _validate_inbound_context(self, speed, course_alignment, distance, validation_reason):
+        """Validate context for extended inbound classification."""
+        if speed is None or course_alignment is None:
+            return False
+
+        # Strong validation criteria for extended inbound range
+        if validation_reason == 'course_aligned_speed_similar':
+            return True
+
+        if course_alignment and speed <= 3.0:  # Low speed + course alignment
+            return True
+
+        if validation_reason == 'boarding_operation' and distance is not None and distance <= 100:
+            return True
+
+        return False
+
+    def _validate_outbound_context(self, speed, course_alignment, distance, validation_reason):
+        """Validate context for extended outbound classification."""
+        if speed is None or course_alignment is None:
+            return False
+
+        # Strong validation criteria for extended outbound range
+        if validation_reason == 'course_aligned_speed_similar':
+            return True
+
+        if course_alignment and speed <= 3.0:  # Low speed + course alignment
+            return True
+
+        if validation_reason == 'boarding_operation' and distance is not None and distance <= 100:
+            return True
+
+        return False
 
     def get_primary_traffic_direction(self, directions_list):
         """
@@ -603,9 +688,13 @@ class PilotBoatAssistanceAnalyzer:
                             else:
                                 validation_reason = 'other'
 
-                            # Classify traffic direction based on vessel heading
-                            vessel_traffic_direction = self.classify_traffic_direction(vessel_course)
-                            pilot_traffic_direction = self.classify_traffic_direction(pilot_course)
+                            # Classify traffic direction with enhanced context awareness
+                            vessel_traffic_direction = self.classify_traffic_direction(
+                                vessel_course, vessel_sog, is_aligned, distance, validation_reason, pilot_course
+                            )
+                            pilot_traffic_direction = self.classify_traffic_direction(
+                                pilot_course, pilot_sog, is_aligned, distance, validation_reason
+                            )
 
                             assistance_events.append({
                                 'timestamp': timestamp,
@@ -798,9 +887,13 @@ class PilotBoatAssistanceAnalyzer:
                             else:
                                 validation_reason = 'other'
 
-                            # Classify traffic direction based on vessel heading
-                            vessel_traffic_direction = self.classify_traffic_direction(vessel_course)
-                            pilot_traffic_direction = self.classify_traffic_direction(pilot_course)
+                            # Classify traffic direction with enhanced context awareness
+                            vessel_traffic_direction = self.classify_traffic_direction(
+                                vessel_course, vessel_sog_val, is_aligned, distance, validation_reason, pilot_course
+                            )
+                            pilot_traffic_direction = self.classify_traffic_direction(
+                                pilot_course, pilot_sog_val, is_aligned, distance, validation_reason
+                            )
 
                             assistance_events.append({
                                 'timestamp': timestamp,
