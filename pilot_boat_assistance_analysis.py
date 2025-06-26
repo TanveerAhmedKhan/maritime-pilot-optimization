@@ -19,6 +19,7 @@ Features:
 - Comprehensive validation statistics and threshold reporting
 - Safety limits: 50m minimum, 500m maximum proximity thresholds
 - Vessel size filtering: excludes vessels with width ≤ 2m or LOA < 60m
+- Tug boat exclusion: excludes 44 known tug boats to focus on large commercial vessels
 - Speed similarity validation: both vessels must have SOG 5-10 knots with ≤3 knot difference
 
 Author: Maritime Analysis System
@@ -59,6 +60,18 @@ class PilotBoatAssistanceAnalyzer:
         self.assistance_events = []
         self.threshold_statistics = {}
 
+        # Tug boat exclusion list - exclude from analysis to focus on large commercial vessels
+        self.tug_boats = {
+            440412320, 440155260, 352003392, 440139260, 440030820, 514446000,
+            440700180, 440051510, 440702880, 440301460, 440112210, 440148520,
+            440165910, 440151610, 440110910, 440075240, 39036, 440313260,
+            440713100, 440152850, 440100580, 440118970, 440018500, 440113610,
+            440127670, 440112730, 441925000, 440083810, 440132580, 440116550,
+            440300350, 440107360, 440184720, 440118750, 373493000, 440200060,
+            354714000, 440313250, 440108150, 440909000, 440016540, 440335980,
+            440005000, 440104800
+        }
+
         print("Pilot Boat Assistance Analyzer initialized")
         if self.use_dynamic_thresholds:
             print(f"Dynamic proximity thresholds enabled (based on vessel dimensions)")
@@ -66,6 +79,7 @@ class PilotBoatAssistanceAnalyzer:
         else:
             print(f"Static proximity threshold: {self.default_proximity_threshold}m")
         print(f"Course alignment threshold: ±{self.course_alignment_threshold}°")
+        print(f"Tug boat exclusion: {len(self.tug_boats)} vessels excluded from analysis")
     
     def haversine_distance(self, lat1, lon1, lat2, lon2):
         """
@@ -567,6 +581,7 @@ class PilotBoatAssistanceAnalyzer:
         """
         Detect assistance events using dynamic proximity thresholds based on vessel dimensions,
         course alignment validation within 20°, and speed similarity validation.
+        Excludes tug boats from analysis to focus on pilot boat interactions with large commercial vessels.
 
         Args:
             sample_size: If provided, only process this many rows for testing
@@ -581,6 +596,7 @@ class PilotBoatAssistanceAnalyzer:
         print(f"Course alignment threshold: ≤{self.course_alignment_threshold}°")
         print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference ≤3 knots")
         print(f"Boarding operation detection: Both vessels ≤2 knots + recent movement validation")
+        print(f"Vessel filtering: Excluding {len(self.tug_boats)} tug boats from analysis")
 
         # Use sample if specified
         data_to_process = self.dynamic_data
@@ -611,8 +627,11 @@ class PilotBoatAssistanceAnalyzer:
             # Get pilot boats at this timestamp
             pilot_boats = vessels_at_time[vessels_at_time['IsPilotBoat']]
 
-            # Get other vessels at this timestamp
-            other_vessels = vessels_at_time[~vessels_at_time['IsPilotBoat']]
+            # Get other vessels at this timestamp (excluding pilot boats and tug boats)
+            other_vessels = vessels_at_time[
+                (~vessels_at_time['IsPilotBoat']) &
+                (~vessels_at_time['MMSI'].isin(self.tug_boats))
+            ]
 
             # Skip if no pilot boats at this time
             if len(pilot_boats) == 0:
@@ -759,6 +778,7 @@ class PilotBoatAssistanceAnalyzer:
         Optimized version using Polars for faster processing of large AIS datasets.
         Detect assistance events using dynamic proximity thresholds based on vessel dimensions,
         course alignment validation within 20°, and speed similarity validation.
+        Excludes tug boats from analysis to focus on pilot boat interactions with large commercial vessels.
 
         Args:
             sample_size: If provided, only process this many rows for testing
@@ -773,6 +793,7 @@ class PilotBoatAssistanceAnalyzer:
         print(f"Course alignment threshold: ≤{self.course_alignment_threshold}°")
         print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference ≤3 knots")
         print(f"Boarding operation detection: Both vessels ≤2 knots + recent movement validation")
+        print(f"Vessel filtering: Excluding {len(self.tug_boats)} tug boats from analysis")
 
         # Use sample if specified
         data_to_process = self.dynamic_data
@@ -812,9 +833,12 @@ class PilotBoatAssistanceAnalyzer:
             # Filter data for current timestamp using Polars
             vessels_at_time = pl_data.filter(pl.col("DateTime") == timestamp)
 
-            # Split into pilot boats and other vessels
+            # Split into pilot boats and other vessels (excluding tug boats)
             pilot_boats = vessels_at_time.filter(pl.col("IsPilotBoat") == True)
-            other_vessels = vessels_at_time.filter(pl.col("IsPilotBoat") == False)
+            other_vessels = vessels_at_time.filter(
+                (pl.col("IsPilotBoat") == False) &
+                (~pl.col("MMSI").is_in(list(self.tug_boats)))
+            )
 
             if len(pilot_boats) == 0:
                 print(f"Warning: No pilot boats at timestamp {timestamp}")
