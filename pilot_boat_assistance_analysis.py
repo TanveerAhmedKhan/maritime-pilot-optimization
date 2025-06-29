@@ -449,17 +449,17 @@ class PilotBoatAssistanceAnalyzer:
             self.static_vessel_data = pd.read_csv(self.static_data_path)
             print(f"Loaded static vessel data: {len(self.static_vessel_data)} records")
 
-            # Check for required columns (note: 'witdh' is the actual column name in the data)
-            if 'MMSI' in self.static_vessel_data.columns and 'witdh' in self.static_vessel_data.columns and 'loa' in self.static_vessel_data.columns:
+            # Check for required columns (note: 'width' is the actual column name in the data)
+            if 'MMSI' in self.static_vessel_data.columns and 'width' in self.static_vessel_data.columns and 'loa' in self.static_vessel_data.columns:
                 # Apply vessel size filtering
                 print("Applying vessel size filters...")
                 original_count = len(self.static_vessel_data)
 
                 # Filter out vessels with width ≤ 2 meters or LOA < 60 meters
                 filtered_data = self.static_vessel_data[
-                    (self.static_vessel_data['witdh'] > 2) &
+                    (self.static_vessel_data['width'] > 2) &
                     (self.static_vessel_data['loa'] >= 60) &
-                    (pd.notna(self.static_vessel_data['witdh'])) &
+                    (pd.notna(self.static_vessel_data['width'])) &
                     (pd.notna(self.static_vessel_data['loa']))
                 ]
 
@@ -474,7 +474,7 @@ class PilotBoatAssistanceAnalyzer:
                 self.vessel_width_lookup = {}
                 for _, row in filtered_data.iterrows():
                     mmsi = row['MMSI']
-                    width = row['witdh']
+                    width = row['width']
                     if pd.notna(width) and width > 0:
                         self.vessel_width_lookup[mmsi] = width
 
@@ -492,7 +492,7 @@ class PilotBoatAssistanceAnalyzer:
                         print(f"LOA range (filtered): {loa_values.min():.1f}m to {loa_values.max():.1f}m")
                         print(f"Average LOA (filtered): {loa_values.mean():.1f}m")
             else:
-                print("Warning: Required columns (MMSI, witdh, loa) not found in static vessel data")
+                print("Warning: Required columns (MMSI, width, loa) not found in static vessel data")
                 self.vessel_width_lookup = {}
 
         except Exception as e:
@@ -556,25 +556,61 @@ class PilotBoatAssistanceAnalyzer:
     
     
     def load_dynamic_data(self):
-        """Load and prepare dynamic AIS data."""
+        """Load and prepare dynamic AIS data with vessel size filtering."""
         print("Loading dynamic AIS data...")
-        
+
         # Load the CSV file
         self.dynamic_data = pd.read_csv(self.dynamic_data_path)
         print(f"Loaded dynamic data: {len(self.dynamic_data)} records")
-        
+
+        # Apply vessel size filtering if static data is available
+        if self.use_dynamic_thresholds and hasattr(self, 'vessel_width_lookup'):
+            print("Applying vessel size filtering to dynamic AIS data...")
+            original_count = len(self.dynamic_data)
+            original_vessels = self.dynamic_data['MMSI'].nunique()
+
+            # Get list of vessels that meet size requirements (from filtered static data)
+            valid_vessel_mmsi = set(self.vessel_width_lookup.keys())
+
+            # Also include pilot boats (they should always be processed regardless of size)
+            valid_vessel_mmsi.update(self.pilot_boat_mmsi)
+
+            # Filter dynamic data to only include vessels that meet size requirements
+            self.dynamic_data = self.dynamic_data[
+                self.dynamic_data['MMSI'].isin(valid_vessel_mmsi)
+            ]
+
+            filtered_count = len(self.dynamic_data)
+            filtered_vessels = self.dynamic_data['MMSI'].nunique()
+            excluded_records = original_count - filtered_count
+            excluded_vessels = original_vessels - filtered_vessels
+
+            print(f"Dynamic data vessel size filtering results:")
+            print(f"- Original records: {original_count:,}")
+            print(f"- Records after filtering: {filtered_count:,}")
+            print(f"- Excluded records: {excluded_records:,}")
+            print(f"- Original unique vessels: {original_vessels}")
+            print(f"- Vessels after filtering: {filtered_vessels}")
+            print(f"- Excluded vessels: {excluded_vessels}")
+
+            # Verify specific vessel exclusion
+            if 440106050 in self.dynamic_data['MMSI'].values:
+                print("WARNING: Vessel MMSI 440106050 still present in dynamic data!")
+            else:
+                print("✓ Vessel MMSI 440106050 successfully excluded from dynamic data")
+
         # Convert DateTime column to datetime
         self.dynamic_data['DateTime'] = pd.to_datetime(self.dynamic_data['DateTime'])
-        
+
         # Sort by MMSI and DateTime for efficient processing
         self.dynamic_data = self.dynamic_data.sort_values(['MMSI', 'DateTime'])
-        
+
         # Add pilot boat flag
         self.dynamic_data['IsPilotBoat'] = self.dynamic_data['MMSI'].isin(self.pilot_boat_mmsi)
-        
+
         print(f"Pilot boat records found: {self.dynamic_data['IsPilotBoat'].sum()}")
         print(f"Unique pilot boats in data: {self.dynamic_data[self.dynamic_data['IsPilotBoat']]['MMSI'].nunique()}")
-        
+
         return self.dynamic_data
     
     def detect_assistance_events(self, sample_size=None):
@@ -589,7 +625,7 @@ class PilotBoatAssistanceAnalyzer:
         print("Detecting assistance events with dynamic proximity, directional, and speed validation...")
         if self.use_dynamic_thresholds:
             print("Using dynamic proximity thresholds based on vessel dimensions")
-            print(f"Formula: 2 × max(pilot_boat_width, target_vessel_width)")
+            print(f"Formula: 2 * max(pilot_boat_width, target_vessel_width)")
             print(f"Fallback threshold: {self.default_proximity_threshold}m")
         else:
             print(f"Using static proximity threshold: {self.default_proximity_threshold}m")
@@ -786,13 +822,13 @@ class PilotBoatAssistanceAnalyzer:
         print("Detecting assistance events with Polars optimization...")
         if self.use_dynamic_thresholds:
             print("Using dynamic proximity thresholds based on vessel dimensions")
-            print(f"Formula: 2 × max(pilot_boat_width, target_vessel_width)")
+            print(f"Formula: 2 * max(pilot_boat_width, target_vessel_width)")
             print(f"Fallback threshold: {self.default_proximity_threshold}m")
         else:
             print(f"Using static proximity threshold: {self.default_proximity_threshold}m")
-        print(f"Course alignment threshold: ≤{self.course_alignment_threshold}°")
-        print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference ≤3 knots")
-        print(f"Boarding operation detection: Both vessels ≤2 knots + recent movement validation")
+        print(f"Course alignment threshold: <={self.course_alignment_threshold} degrees")
+        print(f"Speed similarity validation: Both vessels SOG 5-10 knots, difference <=3 knots")
+        print(f"Boarding operation detection: Both vessels <=2 knots + recent movement validation")
         print(f"Vessel filtering: Excluding {len(self.tug_boats)} tug boats from analysis")
 
         # Use sample if specified
@@ -1148,7 +1184,7 @@ class PilotBoatAssistanceAnalyzer:
 
             # Find continuous sessions (gaps > 5 minutes indicate new session)
             time_diffs = group['timestamp'].diff()
-            session_breaks = time_diffs > pd.Timedelta(minutes=5)
+            session_breaks = time_diffs > pd.Timedelta(minutes=60)
             session_ids = session_breaks.cumsum()
 
             # Process each session
@@ -1445,10 +1481,10 @@ class PilotBoatAssistanceAnalyzer:
         """
         print("Starting complete pilot boat assistance analysis...")
 
-        # Load data
+        # Load data in correct order for vessel size filtering
         self.load_pilot_boat_data()
-        self.load_static_vessel_data()  # Load vessel dimensions for dynamic thresholds
-        self.load_dynamic_data()
+        self.load_static_vessel_data()  # Load vessel dimensions first for filtering
+        self.load_dynamic_data()        # Apply vessel size filtering during dynamic data loading
 
         # Detect assistance events using optimized method
         self.detect_assistance_events_optimized(sample_size=sample_size)

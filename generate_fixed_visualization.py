@@ -7,23 +7,48 @@ import pandas as pd
 import json
 import numpy as np
 from datetime import datetime
+import ast
+
+def parse_trajectory_string(traj_str):
+    """Parse trajectory string from CSV into list of coordinates."""
+    if pd.isna(traj_str) or traj_str == '':
+        return []
+    try:
+        # Parse the string representation of the list
+        traj_list = ast.literal_eval(traj_str)
+        # Convert to [lat, lon] format (removing timestamp if present)
+        if traj_list and len(traj_list[0]) >= 3:
+            # Format: [timestamp, lat, lon] -> [lat, lon]
+            return [[point[1], point[2]] for point in traj_list if len(point) >= 3]
+        elif traj_list and len(traj_list[0]) == 2:
+            # Already in [lat, lon] format
+            return traj_list
+        return []
+    except (ValueError, SyntaxError, IndexError):
+        return []
 
 def load_and_fix_data():
     """Load and fix data format issues."""
     print("Loading and fixing data files...")
-    
+
     # Load sessions data
     sessions = pd.read_csv('pilot_boat_assistance_sessions.csv')
     print(f"Loaded {len(sessions)} sessions")
-    
+
     # Load proximity events
     events = pd.read_csv('pilot_boat_proximity_events.csv')
     print(f"Loaded {len(events)} proximity events")
-    
+
     # Load trajectory data
     with open('pilot_boat_trajectories.json', 'r') as f:
         trajectories = json.load(f)
     print(f"Loaded trajectory data for {len(trajectories)} sessions")
+
+    # Parse trajectory strings in sessions data if they exist as strings
+    if 'pilot_trajectory' in sessions.columns:
+        sessions['pilot_trajectory_parsed'] = sessions['pilot_trajectory'].apply(parse_trajectory_string)
+        sessions['vessel_trajectory_parsed'] = sessions['vessel_trajectory'].apply(parse_trajectory_string)
+        print("Parsed trajectory strings from sessions data")
     
     # Fix data format issues
     print("Fixing data format issues...")
@@ -226,6 +251,24 @@ def generate_fixed_html_visualization():
             <button onclick="fitToData()">Fit to Data</button>
             <button onclick="debugSession()">Debug Session</button>
         </div>
+        <div class="control-group">
+            <label for="trafficFilter">Filter by Traffic Direction:</label>
+            <select id="trafficFilter" onchange="filterSessions()">
+                <option value="">All Directions</option>
+                <option value="inbound">Inbound</option>
+                <option value="outbound">Outbound</option>
+                <option value="mixed">Mixed</option>
+                <option value="other">Other</option>
+            </select>
+            <label for="validationFilter">Filter by Validation:</label>
+            <select id="validationFilter" onchange="filterSessions()">
+                <option value="">All Types</option>
+                <option value="course_aligned_speed_similar">Course Aligned & Speed Similar</option>
+                <option value="boarding_operation">Boarding Operation</option>
+                <option value="course_aligned">Course Aligned</option>
+                <option value="speed_similar">Speed Similar</option>
+            </select>
+        </div>
     </div>
     
     <div class="debug-panel" id="debugPanel">
@@ -235,7 +278,12 @@ def generate_fixed_html_visualization():
     <div class="info-panel" id="infoPanel">
         Select a session to view details and trajectories.
     </div>
-    
+
+    <div class="stats-panel" id="statsPanel">
+        <h4>📊 Session Statistics</h4>
+        <div id="sessionStats">Loading statistics...</div>
+    </div>
+
     <div id="map"></div>
     
     <div class="legend">
@@ -563,16 +611,23 @@ def generate_fixed_html_visualization():
             const panel = document.getElementById('infoPanel');
             const startTime = new Date(session.start_time).toLocaleString();
             const endTime = new Date(session.end_time).toLocaleString();
-            
+
             panel.innerHTML = `
-                <strong>📋 Session Details:</strong>
-                🚤 Pilot MMSI: ${{session.pilot_mmsi}} | 
-                🚢 Vessel MMSI: ${{session.vessel_mmsi}} | 
-                ⏱️ Duration: ${{session.duration_minutes.toFixed(1)}} minutes | 
-                🧭 Traffic Direction: ${{session.primary_traffic_direction || 'unknown'}} | 
-                📍 Events: ${{session.num_observations}} | 
-                🕐 Start: ${{startTime}} | 
-                🕑 End: ${{endTime}}
+                <strong>📋 Session Details:</strong><br>
+                🚤 <strong>Pilot MMSI:</strong> ${{session.pilot_mmsi}} |
+                🚢 <strong>Vessel MMSI:</strong> ${{session.vessel_mmsi}}<br>
+                ⏱️ <strong>Duration:</strong> ${{session.duration_minutes.toFixed(1)}} minutes |
+                📍 <strong>Observations:</strong> ${{session.num_observations}}<br>
+                🧭 <strong>Traffic Direction:</strong> ${{session.primary_traffic_direction || 'unknown'}} |
+                ✅ <strong>Validation:</strong> ${{session.primary_validation_reason || 'unknown'}}<br>
+                📏 <strong>Distance Range:</strong> ${{session.min_distance.toFixed(1)}}m - ${{session.max_distance.toFixed(1)}}m |
+                📊 <strong>Avg Distance:</strong> ${{session.avg_distance.toFixed(1)}}m<br>
+                🧭 <strong>Course Alignment:</strong> ${{(session.course_alignment_ratio * 100).toFixed(1)}}% |
+                🚀 <strong>Speed Similarity:</strong> ${{(session.speed_similarity_ratio * 100).toFixed(1)}}%<br>
+                ⚓ <strong>Boarding Operations:</strong> ${{(session.boarding_operation_ratio * 100).toFixed(1)}}% |
+                🎯 <strong>Trajectory Points:</strong> P:${{session.pilot_trajectory_points || 0}} V:${{session.vessel_trajectory_points || 0}}<br>
+                🕐 <strong>Start:</strong> ${{startTime}}<br>
+                🕑 <strong>End:</strong> ${{endTime}}
             `;
         }}
         
@@ -612,13 +667,94 @@ def generate_fixed_html_visualization():
                 debugLog('No session currently selected');
             }}
         }}
-        
+
+        // Filter sessions based on selected criteria
+        function filterSessions() {{
+            const trafficFilter = document.getElementById('trafficFilter').value;
+            const validationFilter = document.getElementById('validationFilter').value;
+
+            const sessionSelect = document.getElementById('sessionSelect');
+            const allOptions = sessionSelect.querySelectorAll('option');
+
+            // Hide all options first
+            allOptions.forEach(option => {{
+                if (option.value === '') return; // Keep the default option
+
+                const sessionIndex = parseInt(option.value);
+                const session = sessionsData[sessionIndex];
+
+                let showOption = true;
+
+                // Apply traffic direction filter
+                if (trafficFilter && session.primary_traffic_direction !== trafficFilter) {{
+                    showOption = false;
+                }}
+
+                // Apply validation filter
+                if (validationFilter && session.primary_validation_reason !== validationFilter) {{
+                    showOption = false;
+                }}
+
+                option.style.display = showOption ? 'block' : 'none';
+            }});
+
+            updateSessionStatistics();
+        }}
+
+        // Update session statistics
+        function updateSessionStatistics() {{
+            const trafficFilter = document.getElementById('trafficFilter').value;
+            const validationFilter = document.getElementById('validationFilter').value;
+
+            let filteredSessions = sessionsData;
+
+            if (trafficFilter) {{
+                filteredSessions = filteredSessions.filter(s => s.primary_traffic_direction === trafficFilter);
+            }}
+
+            if (validationFilter) {{
+                filteredSessions = filteredSessions.filter(s => s.primary_validation_reason === validationFilter);
+            }}
+
+            // Calculate statistics
+            const totalSessions = filteredSessions.length;
+            const avgDuration = filteredSessions.reduce((sum, s) => sum + s.duration_minutes, 0) / totalSessions;
+            const avgDistance = filteredSessions.reduce((sum, s) => sum + s.avg_distance, 0) / totalSessions;
+
+            // Count by traffic direction
+            const trafficCounts = {{}};
+            filteredSessions.forEach(s => {{
+                trafficCounts[s.primary_traffic_direction] = (trafficCounts[s.primary_traffic_direction] || 0) + 1;
+            }});
+
+            // Count by validation reason
+            const validationCounts = {{}};
+            filteredSessions.forEach(s => {{
+                validationCounts[s.primary_validation_reason] = (validationCounts[s.primary_validation_reason] || 0) + 1;
+            }});
+
+            const statsHtml = `
+                <strong>Filtered Sessions:</strong> ${{totalSessions}}<br>
+                <strong>Average Duration:</strong> ${{avgDuration.toFixed(1)}} minutes<br>
+                <strong>Average Distance:</strong> ${{avgDistance.toFixed(1)}} meters<br>
+                <br>
+                <strong>Traffic Direction:</strong><br>
+                ${{Object.entries(trafficCounts).map(([key, value]) => `&nbsp;&nbsp;${{key}}: ${{value}}`).join('<br>')}}<br>
+                <br>
+                <strong>Validation Reasons:</strong><br>
+                ${{Object.entries(validationCounts).map(([key, value]) => `&nbsp;&nbsp;${{key}}: ${{value}}`).join('<br>')}}
+            `;
+
+            document.getElementById('sessionStats').innerHTML = statsHtml;
+        }}
+
         // Initialize everything when page loads
         document.addEventListener('DOMContentLoaded', function() {{
             debugLog('Page loaded, initializing...');
             initMap();
             populateSessionDropdown();
-            
+            updateSessionStatistics();
+
             // Load first session by default if available
             if (sessionsData.length > 0) {{
                 document.getElementById('sessionSelect').value = 0;
@@ -634,16 +770,20 @@ def generate_fixed_html_visualization():
     with open('pilot_boat_visualization_fixed.html', 'w', encoding='utf-8') as f:
         f.write(html_content)
     
-    print("✅ Created FIXED interactive visualization: pilot_boat_visualization_fixed.html")
-    print(f"📊 Fixed visualization includes:")
+    print("✅ Created ENHANCED interactive visualization: pilot_boat_visualization_fixed.html")
+    print(f"📊 Enhanced visualization includes:")
     print(f"   - {len(sessions)} assistance sessions")
     print(f"   - {len(events)} proximity events")
     print(f"   - {len(trajectories)} trajectory datasets")
-    print(f"🔧 Key fixes applied:")
+    print(f"🔧 Key fixes and enhancements:")
     print(f"   - Fixed trajectory coordinate format ([lat, lon] instead of [timestamp, lat, lon])")
     print(f"   - Fixed MMSI data type consistency (int instead of float)")
     print(f"   - Fixed start_time format matching")
     print(f"   - Added comprehensive debugging")
+    print(f"   - Added traffic direction and validation filtering")
+    print(f"   - Enhanced session details with new metrics")
+    print(f"   - Added real-time session statistics")
+    print(f"   - Improved info panel with detailed session data")
     print(f"🌐 Open 'pilot_boat_visualization_fixed.html' in your web browser!")
     
     return html_content
