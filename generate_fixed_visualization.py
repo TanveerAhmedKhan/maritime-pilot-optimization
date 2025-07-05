@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Generate fixed interactive web-based visualization for pilot boat assistance sessions.
+Generate enhanced interactive web-based visualization for pilot boat assistance sessions.
+Utilizes the new extended trajectory data functionality with 30-minute windows and enhanced AIS data.
 """
 
 import pandas as pd
@@ -27,9 +28,38 @@ def parse_trajectory_string(traj_str):
     except (ValueError, SyntaxError, IndexError):
         return []
 
+def parse_extended_trajectory(traj_data):
+    """
+    Parse extended trajectory data from the new format.
+
+    Args:
+        traj_data: List of dictionaries with timestamp, latitude, longitude, cog, sog
+
+    Returns:
+        List of [lat, lon] coordinates for map display
+    """
+    if not traj_data:
+        return []
+
+    try:
+        # Handle both old format (list of lists) and new format (list of dicts)
+        if isinstance(traj_data[0], dict):
+            # New extended format: [{'timestamp': ..., 'latitude': ..., 'longitude': ..., 'cog': ..., 'sog': ...}]
+            return [[point['latitude'], point['longitude']] for point in traj_data
+                   if 'latitude' in point and 'longitude' in point]
+        elif isinstance(traj_data[0], list) and len(traj_data[0]) >= 2:
+            # Old format: [[lat, lon], ...] or [[timestamp, lat, lon], ...]
+            if len(traj_data[0]) >= 3:
+                return [[point[1], point[2]] for point in traj_data]
+            else:
+                return traj_data
+        return []
+    except (IndexError, KeyError, TypeError):
+        return []
+
 def load_and_fix_data():
-    """Load and fix data format issues."""
-    print("Loading and fixing data files...")
+    """Load and fix data format issues, prioritizing extended trajectory data."""
+    print("Loading enhanced data files with extended trajectory support...")
 
     # Load sessions data
     sessions = pd.read_csv('pilot_boat_assistance_sessions.csv')
@@ -43,6 +73,19 @@ def load_and_fix_data():
     with open('pilot_boat_trajectories.json', 'r') as f:
         trajectories = json.load(f)
     print(f"Loaded trajectory data for {len(trajectories)} sessions")
+
+    # Check for extended trajectory data availability
+    extended_data_available = False
+    if trajectories:
+        sample_key = list(trajectories.keys())[0]
+        sample_traj = trajectories[sample_key]
+        if 'pilot_extended_trajectory' in sample_traj and 'vessel_extended_trajectory' in sample_traj:
+            extended_data_available = True
+            print("SUCCESS: Extended trajectory data (30-minute window) detected and will be used")
+        else:
+            print("INFO: Using standard trajectory data (session duration only)")
+
+    print(f"Extended trajectory data available: {extended_data_available}")
 
     # Parse trajectory strings in sessions data if they exist as strings
     if 'pilot_trajectory' in sessions.columns:
@@ -59,39 +102,53 @@ def load_and_fix_data():
     events['pilot_mmsi'] = events['pilot_mmsi'].astype(int)
     events['vessel_mmsi'] = events['vessel_mmsi'].astype(int)
     
-    # Fix trajectory data format
+    # Fix trajectory data format and prioritize extended trajectory data
     fixed_trajectories = {}
     for key, traj_data in trajectories.items():
         fixed_traj = traj_data.copy()
-        
+
         # Convert MMSI to int
         fixed_traj['pilot_mmsi'] = int(fixed_traj['pilot_mmsi'])
         fixed_traj['vessel_mmsi'] = int(fixed_traj['vessel_mmsi'])
-        
+
         # Fix start_time format to match sessions
         if 'T' in fixed_traj['start_time']:
             fixed_traj['start_time'] = fixed_traj['start_time'].replace('T', ' ')
         if 'T' in fixed_traj['end_time']:
             fixed_traj['end_time'] = fixed_traj['end_time'].replace('T', ' ')
-        
-        # Fix trajectory coordinates - remove timestamp and keep only [lat, lon]
-        if 'pilot_trajectory' in fixed_traj and fixed_traj['pilot_trajectory']:
-            pilot_coords = []
-            for point in fixed_traj['pilot_trajectory']:
-                if len(point) >= 3:  # [timestamp, lat, lon]
-                    pilot_coords.append([point[1], point[2]])  # [lat, lon]
-            fixed_traj['pilot_trajectory'] = pilot_coords
-        
-        if 'vessel_trajectory' in fixed_traj and fixed_traj['vessel_trajectory']:
-            vessel_coords = []
-            for point in fixed_traj['vessel_trajectory']:
-                if len(point) >= 3:  # [timestamp, lat, lon]
-                    vessel_coords.append([point[1], point[2]])  # [lat, lon]
-            fixed_traj['vessel_trajectory'] = vessel_coords
-        
+
+        # Process extended trajectory data (preferred) or fall back to standard trajectory
+        if extended_data_available and 'pilot_extended_trajectory' in fixed_traj:
+            # Use extended trajectory data (30-minute window with COG/SOG)
+            fixed_traj['pilot_trajectory_display'] = parse_extended_trajectory(fixed_traj['pilot_extended_trajectory'])
+            fixed_traj['vessel_trajectory_display'] = parse_extended_trajectory(fixed_traj['vessel_extended_trajectory'])
+            fixed_traj['pilot_trajectory_raw'] = fixed_traj['pilot_extended_trajectory']
+            fixed_traj['vessel_trajectory_raw'] = fixed_traj['vessel_extended_trajectory']
+            fixed_traj['using_extended_data'] = True
+            print(f"Using extended trajectory for {key}: P={len(fixed_traj['pilot_trajectory_display'])}, V={len(fixed_traj['vessel_trajectory_display'])}")
+        else:
+            # Fall back to standard trajectory data (session duration only)
+            if 'pilot_trajectory' in fixed_traj and fixed_traj['pilot_trajectory']:
+                pilot_coords = []
+                for point in fixed_traj['pilot_trajectory']:
+                    if len(point) >= 3:  # [timestamp, lat, lon]
+                        pilot_coords.append([point[1], point[2]])  # [lat, lon]
+                fixed_traj['pilot_trajectory_display'] = pilot_coords
+                fixed_traj['pilot_trajectory_raw'] = fixed_traj['pilot_trajectory']
+
+            if 'vessel_trajectory' in fixed_traj and fixed_traj['vessel_trajectory']:
+                vessel_coords = []
+                for point in fixed_traj['vessel_trajectory']:
+                    if len(point) >= 3:  # [timestamp, lat, lon]
+                        vessel_coords.append([point[1], point[2]])  # [lat, lon]
+                fixed_traj['vessel_trajectory_display'] = vessel_coords
+                fixed_traj['vessel_trajectory_raw'] = fixed_traj['vessel_trajectory']
+
+            fixed_traj['using_extended_data'] = False
+
         fixed_trajectories[key] = fixed_traj
     
-    print("✅ Data format issues fixed")
+    print("SUCCESS: Data format issues fixed")
     return sessions, events, fixed_trajectories
 
 def generate_fixed_html_visualization():
@@ -236,8 +293,9 @@ def generate_fixed_html_visualization():
 </head>
 <body>
     <div class="header">
-        <h1>🚢 Pilot Boat Assistance Sessions - Interactive Visualization (Fixed)</h1>
-        <p>Explore pilot boat and vessel trajectories during assistance operations in Busan Port</p>
+        <h1>🚢 Pilot Boat Assistance Sessions - Enhanced Interactive Visualization</h1>
+        <p>Explore pilot boat and vessel trajectories with extended 30-minute windows during assistance operations in Busan Port</p>
+        <p style="font-size: 14px; margin-top: 5px;">✨ Now featuring extended trajectory data with COG/SOG information and 15-minute pre/post session context</p>
     </div>
     
     <div class="controls">
@@ -289,12 +347,20 @@ def generate_fixed_html_visualization():
     <div class="legend">
         <h4>🗺️ Legend</h4>
         <div class="legend-item">
-            <span class="legend-color" style="background-color: blue;"></span>
-            Pilot Boat Trajectory
+            <span class="legend-color" style="background-color: #0066cc; border: 2px dashed #0066cc;"></span>
+            Pilot Boat (Extended 30-min)
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background-color: blue; border: 2px dashed blue;"></span>
+            Pilot Boat (Standard)
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background-color: #cc0000;"></span>
+            Vessel (Extended 30-min)
         </div>
         <div class="legend-item">
             <span class="legend-color" style="background-color: red;"></span>
-            Vessel Trajectory
+            Vessel (Standard)
         </div>
         <div class="legend-item">
             <span class="legend-marker" style="background-color: green;"></span>
@@ -311,6 +377,9 @@ def generate_fixed_html_visualization():
         <div class="legend-item">
             <span class="legend-marker" style="background-color: yellow; border: 1px solid #ccc;"></span>
             Proximity Area
+        </div>
+        <div class="legend-item" style="font-size: 10px; color: #666; margin-top: 5px;">
+            Extended trajectories include 15 min before + session + 15 min after
         </div>
     </div>
     
@@ -429,16 +498,24 @@ def generate_fixed_html_visualization():
             debugLog(`Found trajectory key: ${{trajectoryKey}}`);
             const trajectoryData = trajectoriesData[trajectoryKey];
             
-            // Get trajectories (already in correct format)
-            const pilotTrajectory = trajectoryData.pilot_trajectory || [];
-            const vesselTrajectory = trajectoryData.vessel_trajectory || [];
-            
+            // Get trajectories (prioritize extended data if available)
+            const pilotTrajectory = trajectoryData.pilot_trajectory_display || trajectoryData.pilot_trajectory || [];
+            const vesselTrajectory = trajectoryData.vessel_trajectory_display || trajectoryData.vessel_trajectory || [];
+            const pilotTrajectoryRaw = trajectoryData.pilot_trajectory_raw || [];
+            const vesselTrajectoryRaw = trajectoryData.vessel_trajectory_raw || [];
+            const usingExtendedData = trajectoryData.using_extended_data || false;
+
+            debugLog(`Using extended trajectory data: ${{usingExtendedData}}`);
             debugLog(`Pilot trajectory points: ${{pilotTrajectory.length}}`);
             debugLog(`Vessel trajectory points: ${{vesselTrajectory.length}}`);
             
             // Add trajectories to map
             if (showFullTrajectories) {{
-                addTrajectoriesToMap(pilotTrajectory, vesselTrajectory, session);
+                addTrajectoriesToMap(pilotTrajectory, vesselTrajectory, session, {{
+                    pilotTrajectoryRaw: pilotTrajectoryRaw,
+                    vesselTrajectoryRaw: vesselTrajectoryRaw,
+                    usingExtendedData: usingExtendedData
+                }});
             }}
             
             // Add proximity events
@@ -466,40 +543,67 @@ def generate_fixed_html_visualization():
         }}
         
         // Add trajectories to map
-        function addTrajectoriesToMap(pilotTrajectory, vesselTrajectory, session) {{
-            debugLog('Adding trajectories to map...');
-            
+        function addTrajectoriesToMap(pilotTrajectory, vesselTrajectory, session, trajectoryInfo = {{}}) {{
+            debugLog('Adding enhanced trajectories to map...');
+
+            const usingExtendedData = trajectoryInfo.usingExtendedData || false;
+            const pilotTrajectoryRaw = trajectoryInfo.pilotTrajectoryRaw || [];
+            const vesselTrajectoryRaw = trajectoryInfo.vesselTrajectoryRaw || [];
+
             // Add pilot trajectory
             if (pilotTrajectory && pilotTrajectory.length > 1) {{
-                debugLog(`Adding pilot trajectory with ${{pilotTrajectory.length}} points`);
-                
+                debugLog(`Adding pilot trajectory with ${{pilotTrajectory.length}} points (extended: ${{usingExtendedData}})`);
+
+                // Create trajectory line with enhanced styling for extended data
                 const pilotLine = L.polyline(pilotTrajectory, {{
-                    color: 'blue',
-                    weight: 4,
+                    color: usingExtendedData ? '#0066cc' : 'blue',
+                    weight: usingExtendedData ? 5 : 4,
                     opacity: 0.8,
-                    dashArray: '5, 5'
-                }}).bindPopup(`🚤 Pilot Boat ${{session.pilot_mmsi}} Trajectory<br>Points: ${{pilotTrajectory.length}}`);
-                
+                    dashArray: usingExtendedData ? '10, 5' : '5, 5'
+                }}).bindPopup(`🚤 Pilot Boat ${{session.pilot_mmsi}} Trajectory<br>
+                    Points: ${{pilotTrajectory.length}}<br>
+                    Data Type: ${{usingExtendedData ? 'Extended (30-min window)' : 'Standard (session only)'}}<br>
+                    ${{usingExtendedData ? 'Includes: 15 min before + session + 15 min after' : 'Session duration only'}}`);
+
                 currentLayers.push(pilotLine);
                 pilotLine.addTo(map);
                 
-                // Add start/end markers for pilot
+                // Add start/end markers for pilot with enhanced information
+                let pilotStartPopup = `🚤 Pilot Start<br>${{session.start_time}}`;
+                let pilotEndPopup = `🚤 Pilot End<br>${{session.end_time}}`;
+
+                // Add COG/SOG information if using extended data
+                if (usingExtendedData && pilotTrajectoryRaw.length > 0) {{
+                    const startPoint = pilotTrajectoryRaw[0];
+                    const endPoint = pilotTrajectoryRaw[pilotTrajectoryRaw.length - 1];
+
+                    if (startPoint && typeof startPoint === 'object' && 'cog' in startPoint) {{
+                        pilotStartPopup += `<br>COG: ${{startPoint.cog !== null ? startPoint.cog.toFixed(1) + '°' : 'N/A'}}`;
+                        pilotStartPopup += `<br>SOG: ${{startPoint.sog !== null ? startPoint.sog.toFixed(1) + ' kts' : 'N/A'}}`;
+                    }}
+
+                    if (endPoint && typeof endPoint === 'object' && 'cog' in endPoint) {{
+                        pilotEndPopup += `<br>COG: ${{endPoint.cog !== null ? endPoint.cog.toFixed(1) + '°' : 'N/A'}}`;
+                        pilotEndPopup += `<br>SOG: ${{endPoint.sog !== null ? endPoint.sog.toFixed(1) + ' kts' : 'N/A'}}`;
+                    }}
+                }}
+
                 const pilotStart = L.marker(pilotTrajectory[0], {{
                     icon: L.divIcon({{
                         className: 'custom-marker',
                         html: '<div style="background-color: blue; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 3px rgba(0,0,0,0.5);"></div>',
                         iconSize: [16, 16]
                     }})
-                }}).bindPopup(`🚤 Pilot Start<br>${{session.start_time}}`);
-                
+                }}).bindPopup(pilotStartPopup);
+
                 const pilotEnd = L.marker(pilotTrajectory[pilotTrajectory.length - 1], {{
                     icon: L.divIcon({{
                         className: 'custom-marker',
                         html: '<div style="background-color: darkblue; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 3px rgba(0,0,0,0.5);"></div>',
                         iconSize: [16, 16]
                     }})
-                }}).bindPopup(`🚤 Pilot End<br>${{session.end_time}}`);
-                
+                }}).bindPopup(pilotEndPopup);
+
                 currentLayers.push(pilotStart, pilotEnd);
                 pilotStart.addTo(map);
                 pilotEnd.addTo(map);
@@ -507,34 +611,56 @@ def generate_fixed_html_visualization():
             
             // Add vessel trajectory
             if (vesselTrajectory && vesselTrajectory.length > 1) {{
-                debugLog(`Adding vessel trajectory with ${{vesselTrajectory.length}} points`);
-                
+                debugLog(`Adding vessel trajectory with ${{vesselTrajectory.length}} points (extended: ${{usingExtendedData}})`);
+
                 const vesselLine = L.polyline(vesselTrajectory, {{
-                    color: 'red',
-                    weight: 4,
+                    color: usingExtendedData ? '#cc0000' : 'red',
+                    weight: usingExtendedData ? 5 : 4,
                     opacity: 0.8
-                }}).bindPopup(`🚢 Vessel ${{session.vessel_mmsi}} Trajectory<br>Points: ${{vesselTrajectory.length}}`);
-                
+                }}).bindPopup(`🚢 Vessel ${{session.vessel_mmsi}} Trajectory<br>
+                    Points: ${{vesselTrajectory.length}}<br>
+                    Data Type: ${{usingExtendedData ? 'Extended (30-min window)' : 'Standard (session only)'}}<br>
+                    ${{usingExtendedData ? 'Includes: 15 min before + session + 15 min after' : 'Session duration only'}}`);
+
                 currentLayers.push(vesselLine);
                 vesselLine.addTo(map);
-                
-                // Add start/end markers for vessel
+
+                // Add start/end markers for vessel with enhanced information
+                let vesselStartPopup = `🚢 Vessel Start<br>${{session.start_time}}`;
+                let vesselEndPopup = `🚢 Vessel End<br>${{session.end_time}}`;
+
+                // Add COG/SOG information if using extended data
+                if (usingExtendedData && vesselTrajectoryRaw.length > 0) {{
+                    const startPoint = vesselTrajectoryRaw[0];
+                    const endPoint = vesselTrajectoryRaw[vesselTrajectoryRaw.length - 1];
+
+                    if (startPoint && typeof startPoint === 'object' && 'cog' in startPoint) {{
+                        vesselStartPopup += `<br>COG: ${{startPoint.cog !== null ? startPoint.cog.toFixed(1) + '°' : 'N/A'}}`;
+                        vesselStartPopup += `<br>SOG: ${{startPoint.sog !== null ? startPoint.sog.toFixed(1) + ' kts' : 'N/A'}}`;
+                    }}
+
+                    if (endPoint && typeof endPoint === 'object' && 'cog' in endPoint) {{
+                        vesselEndPopup += `<br>COG: ${{endPoint.cog !== null ? endPoint.cog.toFixed(1) + '°' : 'N/A'}}`;
+                        vesselEndPopup += `<br>SOG: ${{endPoint.sog !== null ? endPoint.sog.toFixed(1) + ' kts' : 'N/A'}}`;
+                    }}
+                }}
+
                 const vesselStart = L.marker(vesselTrajectory[0], {{
                     icon: L.divIcon({{
                         className: 'custom-marker',
                         html: '<div style="background-color: red; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 3px rgba(0,0,0,0.5);"></div>',
                         iconSize: [16, 16]
                     }})
-                }}).bindPopup(`🚢 Vessel Start<br>${{session.start_time}}`);
-                
+                }}).bindPopup(vesselStartPopup);
+
                 const vesselEnd = L.marker(vesselTrajectory[vesselTrajectory.length - 1], {{
                     icon: L.divIcon({{
                         className: 'custom-marker',
                         html: '<div style="background-color: darkred; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 3px rgba(0,0,0,0.5);"></div>',
                         iconSize: [16, 16]
                     }})
-                }}).bindPopup(`🚢 Vessel End<br>${{session.end_time}}`);
-                
+                }}).bindPopup(vesselEndPopup);
+
                 currentLayers.push(vesselStart, vesselEnd);
                 vesselStart.addTo(map);
                 vesselEnd.addTo(map);
@@ -545,14 +671,14 @@ def generate_fixed_html_visualization():
         function addProximityEventsToMap(session) {{
             debugLog('Adding proximity events to map...');
             
-            const sessionEvents = eventsData.filter(event => 
+            const sessionEvents = eventsData.filter(event =>
                 event.pilot_mmsi == session.pilot_mmsi &&
                 event.vessel_mmsi == session.vessel_mmsi &&
                 event.timestamp >= session.start_time &&
                 event.timestamp <= session.end_time
-            );
-            
-            debugLog(`Found ${{sessionEvents.length}} proximity events for session`);
+            ).sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+            debugLog(`Found ${{sessionEvents.length}} proximity events for session (sorted by timestamp)`);
             
             sessionEvents.forEach((event, index) => {{
                 // Determine marker color and icon based on validation reason
@@ -626,6 +752,8 @@ def generate_fixed_html_visualization():
                 🚀 <strong>Speed Similarity:</strong> ${{(session.speed_similarity_ratio * 100).toFixed(1)}}%<br>
                 ⚓ <strong>Boarding Operations:</strong> ${{(session.boarding_operation_ratio * 100).toFixed(1)}}% |
                 🎯 <strong>Trajectory Points:</strong> P:${{session.pilot_trajectory_points || 0}} V:${{session.vessel_trajectory_points || 0}}<br>
+                📈 <strong>Extended Trajectory:</strong> ${{session.pilot_extended_trajectory_points ? 'Available' : 'Not Available'}} |
+                🕐 <strong>Extended Points:</strong> P:${{session.pilot_extended_trajectory_points || 0}} V:${{session.vessel_extended_trajectory_points || 0}}<br>
                 🕐 <strong>Start:</strong> ${{startTime}}<br>
                 🕑 <strong>End:</strong> ${{endTime}}
             `;
@@ -767,24 +895,28 @@ def generate_fixed_html_visualization():
 """
     
     # Save HTML file
-    with open('pilot_boat_visualization_fixed.html', 'w', encoding='utf-8') as f:
+    with open('pilot_boat_visualization_enhanced.html', 'w', encoding='utf-8') as f:
         f.write(html_content)
-    
-    print("✅ Created ENHANCED interactive visualization: pilot_boat_visualization_fixed.html")
-    print(f"📊 Enhanced visualization includes:")
+
+    print("SUCCESS: Created ENHANCED interactive visualization: pilot_boat_visualization_enhanced.html")
+    print(f"ENHANCED VISUALIZATION INCLUDES:")
     print(f"   - {len(sessions)} assistance sessions")
     print(f"   - {len(events)} proximity events")
     print(f"   - {len(trajectories)} trajectory datasets")
-    print(f"🔧 Key fixes and enhancements:")
-    print(f"   - Fixed trajectory coordinate format ([lat, lon] instead of [timestamp, lat, lon])")
-    print(f"   - Fixed MMSI data type consistency (int instead of float)")
-    print(f"   - Fixed start_time format matching")
-    print(f"   - Added comprehensive debugging")
-    print(f"   - Added traffic direction and validation filtering")
-    print(f"   - Enhanced session details with new metrics")
-    print(f"   - Added real-time session statistics")
-    print(f"   - Improved info panel with detailed session data")
-    print(f"🌐 Open 'pilot_boat_visualization_fixed.html' in your web browser!")
+    print(f"NEW EXTENDED TRAJECTORY FEATURES:")
+    print(f"   - 30-minute trajectory windows (15 min before + session + 15 min after)")
+    print(f"   - Course Over Ground (COG) and Speed Over Ground (SOG) data display")
+    print(f"   - Enhanced trajectory styling for extended vs standard data")
+    print(f"   - Automatic detection and use of extended trajectory data when available")
+    print(f"   - Backward compatibility with existing standard trajectory data")
+    print(f"KEY FIXES AND ENHANCEMENTS:")
+    print(f"   - Prioritizes extended trajectory data for comprehensive vessel movement context")
+    print(f"   - Enhanced popups with COG/SOG information for start/end markers")
+    print(f"   - Visual distinction between extended (30-min) and standard (session-only) trajectories")
+    print(f"   - Fixed trajectory coordinate format and data type consistency")
+    print(f"   - Added comprehensive debugging and session statistics")
+    print(f"   - Enhanced session details with extended trajectory metrics")
+    print(f"NEXT STEP: Open 'pilot_boat_visualization_enhanced.html' in your web browser!")
     
     return html_content
 
