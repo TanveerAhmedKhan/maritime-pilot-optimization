@@ -2110,22 +2110,553 @@ class PilotBoatAssistanceAnalyzer:
                 vessel_analysis.to_csv('vessel_assistance_summary.csv')
                 print("Saved vessel assistance summary to: vessel_assistance_summary.csv")
 
+    def save_trajectory_data(self, filename):
+        """
+        Save trajectory data to JSON file.
 
-def main():
+        Args:
+            filename: Path to save the JSON file
+        """
+        import json
+
+        if not hasattr(self, 'assistance_sessions') or self.assistance_sessions.empty:
+            print("No trajectory data to save")
+            return
+
+        trajectory_data = {}
+
+        for idx, session in self.assistance_sessions.iterrows():
+            session_id = f"session_{idx}"
+
+            trajectory_data[session_id] = {
+                'session_info': {
+                    'pilot_mmsi': int(session['pilot_mmsi']) if pd.notna(session['pilot_mmsi']) else None,
+                    'vessel_mmsi': int(session['vessel_mmsi']) if pd.notna(session['vessel_mmsi']) else None,
+                    'start_time': session['start_time'].isoformat() if pd.notna(session['start_time']) else None,
+                    'end_time': session['end_time'].isoformat() if pd.notna(session['end_time']) else None,
+                    'duration_minutes': float(session['duration_minutes']) if pd.notna(session['duration_minutes']) else None
+                },
+                'pilot_trajectory': session.get('pilot_trajectory', []) if pd.notna(session.get('pilot_trajectory')) else [],
+                'vessel_trajectory': session.get('vessel_trajectory', []) if pd.notna(session.get('vessel_trajectory')) else []
+            }
+
+        try:
+            with open(filename, 'w') as f:
+                json.dump(trajectory_data, f, indent=2, default=str)
+            print(f"Trajectory data saved to: {filename}")
+        except Exception as e:
+            print(f"Error saving trajectory data: {e}")
+
+
+# def main():
+#     """
+#     Main function to run the pilot boat assistance analysis.
+#     """
+#     # File paths
+#     dynamic_data_path = "Sample_data_&_trial_codes/dataSet/busan/Busan_Dynamic_20230601_sorted.csv"
+#     pilot_boat_excel_path = "BusanPB.xlsx"
+#     static_data_path = "Sample_data_&_trial_codes/dataSet/busan/Static_Busan_Dynamic_20230601.csv"
+
+#     # Create analyzer instance with dynamic thresholds
+#     analyzer = PilotBoatAssistanceAnalyzer(dynamic_data_path, pilot_boat_excel_path, static_data_path)
+
+#     # Run complete analysis
+#     analyzer.run_complete_analysis()
+
+
+def main_weekly_analysis():
     """
-    Main function to run the pilot boat assistance analysis.
+    Main function to run pilot boat assistance analysis for all 7 days of data.
+    Processes each day individually and creates organized output structure.
     """
-    # File paths
-    dynamic_data_path = "Sample_data_&_trial_codes/dataSet/busan/Busan_Dynamic_20230601_sorted.csv"
+    import os
+    from datetime import datetime
+
+    print("="*80)
+    print("MARITIME PILOT BOAT ASSISTANCE ANALYSIS - WEEKLY PROCESSING")
+    print("="*80)
+    print(f"Analysis started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
+
+    # Base paths
+    data_base_path = "Sample_data_&_trial_codes/dataSet/busan"
     pilot_boat_excel_path = "BusanPB.xlsx"
-    static_data_path = "Sample_data_&_trial_codes/dataSet/busan/Static_Busan_Dynamic_20230601.csv"
 
-    # Create analyzer instance with dynamic thresholds
-    analyzer = PilotBoatAssistanceAnalyzer(dynamic_data_path, pilot_boat_excel_path, static_data_path)
+    # Create results directory structure
+    results_base_dir = "results"
+    daily_analysis_dir = os.path.join(results_base_dir, "daily_analysis")
+    weekly_summary_dir = os.path.join(results_base_dir, "weekly_summary")
 
-    # Run complete analysis
-    analyzer.run_complete_analysis()
+    # Create directories if they don't exist
+    os.makedirs(daily_analysis_dir, exist_ok=True)
+    os.makedirs(weekly_summary_dir, exist_ok=True)
+
+    print(f"Created output directory structure:")
+    print(f"- Daily analysis: {daily_analysis_dir}")
+    print(f"- Weekly summary: {weekly_summary_dir}")
+    print()
+
+    # Define the 7 days of data to process
+    dates = ["20230601", "20230602", "20230603", "20230604", "20230605", "20230606", "20230607"]
+
+    # Storage for weekly aggregation
+    weekly_sessions = []
+    weekly_events = []
+    weekly_performance = []
+    weekly_vessel_analysis = []
+    daily_summaries = []
+
+    # Process each day
+    for i, date in enumerate(dates, 1):
+        print(f"Processing Day {i}/7: {date}")
+        print("-" * 50)
+
+        # Construct file paths for this date
+        dynamic_data_path = os.path.join(data_base_path, f"Busan_Dynamic_{date}_sorted.csv")
+        static_data_path = os.path.join(data_base_path, f"Static_Busan_Dynamic_{date}.csv")
+
+        # Check if files exist
+        if not os.path.exists(dynamic_data_path):
+            print(f"WARNING: Dynamic data file not found: {dynamic_data_path}")
+            continue
+        if not os.path.exists(static_data_path):
+            print(f"WARNING: Static data file not found: {static_data_path}")
+            continue
+
+        try:
+            # Create analyzer instance for this day
+            analyzer = PilotBoatAssistanceAnalyzer(dynamic_data_path, pilot_boat_excel_path, static_data_path)
+
+            # Run complete analysis for this day
+            analyzer.run_complete_analysis()
+
+            # Create day-specific output directory
+            day_output_dir = os.path.join(daily_analysis_dir, f"day_{i}_{date}")
+            os.makedirs(day_output_dir, exist_ok=True)
+
+            # Save day-specific results
+            save_daily_results(analyzer, day_output_dir, date)
+
+            # Collect data for weekly aggregation
+            if hasattr(analyzer, 'assistance_sessions') and not analyzer.assistance_sessions.empty:
+                sessions_with_date = analyzer.assistance_sessions.copy()
+                sessions_with_date['analysis_date'] = date
+                weekly_sessions.append(sessions_with_date)
+
+            if hasattr(analyzer, 'assistance_events') and not analyzer.assistance_events.empty:
+                events_with_date = analyzer.assistance_events.copy()
+                events_with_date['analysis_date'] = date
+                weekly_events.append(events_with_date)
+
+            # Collect performance data
+            pilot_performance = analyzer.analyze_pilot_boat_performance()
+            if not pilot_performance.empty:
+                pilot_performance['analysis_date'] = date
+                weekly_performance.append(pilot_performance)
+
+            vessel_analysis = analyzer.analyze_vessel_types()
+            if not vessel_analysis.empty:
+                vessel_analysis['analysis_date'] = date
+                weekly_vessel_analysis.append(vessel_analysis)
+
+            # Create daily summary
+            daily_summary = create_daily_summary(analyzer, date, i)
+            daily_summaries.append(daily_summary)
+
+            print(f"SUCCESS: Day {i} ({date}) processing completed successfully")
+            print(f"  Results saved to: {day_output_dir}")
+            print()
+
+        except Exception as e:
+            print(f"ERROR: Error processing day {i} ({date}): {str(e)}")
+            print()
+            continue
+
+    # Generate weekly summary
+    print("Generating weekly summary...")
+    print("-" * 50)
+    generate_weekly_summary(weekly_sessions, weekly_events, weekly_performance,
+                          weekly_vessel_analysis, daily_summaries, weekly_summary_dir)
+
+    print("="*80)
+    print("WEEKLY ANALYSIS COMPLETED SUCCESSFULLY")
+    print("="*80)
+    print(f"Analysis completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Results available in: {results_base_dir}")
+    print()
+
+
+def save_daily_results(analyzer, output_dir, date):
+    """
+    Save analysis results for a specific day to the designated output directory.
+
+    Args:
+        analyzer: PilotBoatAssistanceAnalyzer instance
+        output_dir: Directory to save results
+        date: Date string for file naming
+    """
+    import os
+
+    # Save proximity events
+    if hasattr(analyzer, 'assistance_events') and not analyzer.assistance_events.empty:
+        events_file = os.path.join(output_dir, f"pilot_boat_proximity_events_{date}.csv")
+        analyzer.assistance_events.to_csv(events_file, index=False)
+        print(f"  Saved proximity events: {events_file}")
+
+    # Save assistance sessions
+    if hasattr(analyzer, 'assistance_sessions') and not analyzer.assistance_sessions.empty:
+        # Create a copy for CSV export (trajectory data needs special handling)
+        sessions_for_csv = analyzer.assistance_sessions.copy()
+
+        # Convert trajectory data to string representation for CSV
+        if 'pilot_trajectory' in sessions_for_csv.columns:
+            def format_trajectory(x):
+                if x is None or (isinstance(x, float) and pd.isna(x)):
+                    return "No data"
+                elif isinstance(x, list):
+                    return f"Points: {len(x)}"
+                else:
+                    return "No data"
+
+            sessions_for_csv['pilot_trajectory_summary'] = sessions_for_csv['pilot_trajectory'].apply(format_trajectory)
+            sessions_for_csv = sessions_for_csv.drop('pilot_trajectory', axis=1)
+
+        if 'vessel_trajectory' in sessions_for_csv.columns:
+            def format_trajectory(x):
+                if x is None or (isinstance(x, float) and pd.isna(x)):
+                    return "No data"
+                elif isinstance(x, list):
+                    return f"Points: {len(x)}"
+                else:
+                    return "No data"
+
+            sessions_for_csv['vessel_trajectory_summary'] = sessions_for_csv['vessel_trajectory'].apply(format_trajectory)
+            sessions_for_csv = sessions_for_csv.drop('vessel_trajectory', axis=1)
+
+        sessions_file = os.path.join(output_dir, f"pilot_boat_assistance_sessions_{date}.csv")
+        sessions_for_csv.to_csv(sessions_file, index=False)
+        print(f"  Saved assistance sessions: {sessions_file}")
+
+        # Save trajectory data separately as JSON
+        if hasattr(analyzer, 'assistance_sessions'):
+            trajectory_file = os.path.join(output_dir, f"pilot_boat_trajectories_{date}.json")
+            analyzer.save_trajectory_data(trajectory_file)
+            print(f"  Saved trajectory data: {trajectory_file}")
+
+    # Save performance summaries
+    pilot_performance = analyzer.analyze_pilot_boat_performance()
+    if not pilot_performance.empty:
+        performance_file = os.path.join(output_dir, f"pilot_boat_performance_summary_{date}.csv")
+        pilot_performance.to_csv(performance_file, index=False)
+        print(f"  Saved pilot performance: {performance_file}")
+
+    vessel_analysis = analyzer.analyze_vessel_types()
+    if not vessel_analysis.empty:
+        vessel_file = os.path.join(output_dir, f"vessel_assistance_summary_{date}.csv")
+        vessel_analysis.to_csv(vessel_file, index=False)
+        print(f"  Saved vessel analysis: {vessel_file}")
+
+
+def create_daily_summary(analyzer, date, day_number):
+    """
+    Create a summary dictionary for a single day's analysis.
+
+    Args:
+        analyzer: PilotBoatAssistanceAnalyzer instance
+        date: Date string
+        day_number: Day number (1-7)
+
+    Returns:
+        Dictionary with daily summary statistics
+    """
+    summary = {
+        'day_number': day_number,
+        'date': date,
+        'total_events': 0,
+        'total_sessions': 0,
+        'unique_pilot_boats': 0,
+        'unique_vessels': 0,
+        'avg_session_duration': 0,
+        'total_assistance_time': 0,
+        'inbound_sessions': 0,
+        'outbound_sessions': 0,
+        'other_sessions': 0
+    }
+
+    # Events summary
+    if hasattr(analyzer, 'assistance_events') and not analyzer.assistance_events.empty:
+        summary['total_events'] = len(analyzer.assistance_events)
+        summary['unique_pilot_boats'] = analyzer.assistance_events['pilot_mmsi'].nunique()
+        summary['unique_vessels'] = analyzer.assistance_events['vessel_mmsi'].nunique()
+
+    # Sessions summary
+    if hasattr(analyzer, 'assistance_sessions') and not analyzer.assistance_sessions.empty:
+        sessions = analyzer.assistance_sessions
+        summary['total_sessions'] = len(sessions)
+        summary['avg_session_duration'] = sessions['duration_minutes'].mean()
+        summary['total_assistance_time'] = sessions['duration_minutes'].sum()
+
+        # Traffic direction breakdown
+        if 'hybrid_direction' in sessions.columns:
+            direction_counts = sessions['hybrid_direction'].value_counts()
+            summary['inbound_sessions'] = direction_counts.get('inbound', 0)
+            summary['outbound_sessions'] = direction_counts.get('outbound', 0)
+            summary['other_sessions'] = direction_counts.get('other', 0) + direction_counts.get('mixed', 0)
+        elif 'primary_traffic_direction' in sessions.columns:
+            direction_counts = sessions['primary_traffic_direction'].value_counts()
+            summary['inbound_sessions'] = direction_counts.get('inbound', 0)
+            summary['outbound_sessions'] = direction_counts.get('outbound', 0)
+            summary['other_sessions'] = direction_counts.get('other', 0) + direction_counts.get('mixed', 0)
+
+    return summary
+
+
+def generate_weekly_summary(weekly_sessions, weekly_events, weekly_performance,
+                          weekly_vessel_analysis, daily_summaries, output_dir):
+    """
+    Generate comprehensive weekly summary from all daily analyses.
+
+    Args:
+        weekly_sessions: List of session DataFrames from all days
+        weekly_events: List of event DataFrames from all days
+        weekly_performance: List of performance DataFrames from all days
+        weekly_vessel_analysis: List of vessel analysis DataFrames from all days
+        daily_summaries: List of daily summary dictionaries
+        output_dir: Directory to save weekly summary files
+    """
+    import os
+
+    print("Generating weekly summary reports...")
+
+    # Combine all sessions
+    if weekly_sessions:
+        combined_sessions = pd.concat(weekly_sessions, ignore_index=True)
+        sessions_file = os.path.join(output_dir, "weekly_assistance_sessions_summary.csv")
+        combined_sessions.to_csv(sessions_file, index=False)
+        print(f"SUCCESS: Weekly sessions summary: {sessions_file}")
+
+        # Generate weekly session statistics
+        weekly_session_stats = analyze_weekly_sessions(combined_sessions)
+        stats_file = os.path.join(output_dir, "weekly_session_statistics.csv")
+        weekly_session_stats.to_csv(stats_file, index=False)
+        print(f"SUCCESS: Weekly session statistics: {stats_file}")
+
+    # Combine all events
+    if weekly_events:
+        combined_events = pd.concat(weekly_events, ignore_index=True)
+        events_file = os.path.join(output_dir, "weekly_proximity_events_summary.csv")
+        combined_events.to_csv(events_file, index=False)
+        print(f"SUCCESS: Weekly events summary: {events_file}")
+
+    # Combine performance data
+    if weekly_performance:
+        combined_performance = pd.concat(weekly_performance, ignore_index=True)
+        performance_file = os.path.join(output_dir, "weekly_pilot_performance_summary.csv")
+        combined_performance.to_csv(performance_file, index=False)
+        print(f"SUCCESS: Weekly performance summary: {performance_file}")
+
+    # Combine vessel analysis
+    if weekly_vessel_analysis:
+        combined_vessel_analysis = pd.concat(weekly_vessel_analysis, ignore_index=True)
+        vessel_file = os.path.join(output_dir, "weekly_vessel_analysis_summary.csv")
+        combined_vessel_analysis.to_csv(vessel_file, index=False)
+        print(f"SUCCESS: Weekly vessel analysis: {vessel_file}")
+
+    # Create daily summaries report
+    if daily_summaries:
+        daily_summary_df = pd.DataFrame(daily_summaries)
+        daily_file = os.path.join(output_dir, "daily_summaries_overview.csv")
+        daily_summary_df.to_csv(daily_file, index=False)
+        print(f"SUCCESS: Daily summaries overview: {daily_file}")
+
+        # Generate weekly trends analysis
+        trends_analysis = analyze_weekly_trends(daily_summary_df)
+        trends_file = os.path.join(output_dir, "weekly_trends_analysis.csv")
+        trends_analysis.to_csv(trends_file, index=False)
+        print(f"SUCCESS: Weekly trends analysis: {trends_file}")
+
+    # Generate comprehensive weekly report
+    generate_weekly_report(weekly_sessions, daily_summaries, output_dir)
+
+    print("Weekly summary generation completed!")
+
+
+def analyze_weekly_sessions(combined_sessions):
+    """
+    Analyze weekly session patterns and generate statistics.
+
+    Args:
+        combined_sessions: Combined DataFrame of all sessions
+
+    Returns:
+        DataFrame with weekly session statistics
+    """
+    stats = []
+
+    # Overall statistics
+    total_sessions = len(combined_sessions)
+    total_duration = combined_sessions['duration_minutes'].sum()
+    avg_duration = combined_sessions['duration_minutes'].mean()
+
+    stats.append({
+        'metric': 'Total Sessions',
+        'value': total_sessions,
+        'unit': 'sessions'
+    })
+
+    stats.append({
+        'metric': 'Total Assistance Time',
+        'value': round(total_duration, 2),
+        'unit': 'minutes'
+    })
+
+    stats.append({
+        'metric': 'Average Session Duration',
+        'value': round(avg_duration, 2),
+        'unit': 'minutes'
+    })
+
+    # Traffic direction statistics
+    if 'hybrid_direction' in combined_sessions.columns:
+        direction_col = 'hybrid_direction'
+    elif 'primary_traffic_direction' in combined_sessions.columns:
+        direction_col = 'primary_traffic_direction'
+    else:
+        direction_col = None
+
+    if direction_col:
+        direction_counts = combined_sessions[direction_col].value_counts()
+        for direction, count in direction_counts.items():
+            percentage = (count / total_sessions) * 100
+            stats.append({
+                'metric': f'{direction.title()} Sessions',
+                'value': f"{count} ({percentage:.1f}%)",
+                'unit': 'sessions'
+            })
+
+    # Pilot boat statistics
+    unique_pilots = combined_sessions['pilot_mmsi'].nunique()
+    unique_vessels = combined_sessions['vessel_mmsi'].nunique()
+
+    stats.append({
+        'metric': 'Unique Pilot Boats',
+        'value': unique_pilots,
+        'unit': 'vessels'
+    })
+
+    stats.append({
+        'metric': 'Unique Assisted Vessels',
+        'value': unique_vessels,
+        'unit': 'vessels'
+    })
+
+    return pd.DataFrame(stats)
+
+
+def analyze_weekly_trends(daily_summary_df):
+    """
+    Analyze trends across the week.
+
+    Args:
+        daily_summary_df: DataFrame with daily summaries
+
+    Returns:
+        DataFrame with trend analysis
+    """
+    trends = []
+
+    # Calculate day-over-day changes
+    for metric in ['total_sessions', 'total_assistance_time', 'unique_pilot_boats', 'unique_vessels']:
+        if metric in daily_summary_df.columns:
+            values = daily_summary_df[metric].tolist()
+
+            # Calculate trend (simple linear trend)
+            days = list(range(1, len(values) + 1))
+            if len(values) > 1:
+                correlation = pd.Series(days).corr(pd.Series(values))
+                trend_direction = "Increasing" if correlation > 0.1 else "Decreasing" if correlation < -0.1 else "Stable"
+            else:
+                trend_direction = "Insufficient data"
+
+            trends.append({
+                'metric': metric.replace('_', ' ').title(),
+                'week_total': sum(values) if values else 0,
+                'daily_average': sum(values) / len(values) if values else 0,
+                'min_day': min(values) if values else 0,
+                'max_day': max(values) if values else 0,
+                'trend_direction': trend_direction
+            })
+
+    return pd.DataFrame(trends)
+
+
+def generate_weekly_report(weekly_sessions, daily_summaries, output_dir):
+    """
+    Generate a comprehensive weekly report in text format.
+
+    Args:
+        weekly_sessions: List of session DataFrames
+        daily_summaries: List of daily summary dictionaries
+        output_dir: Output directory
+    """
+    import os
+    from datetime import datetime
+
+    report_file = os.path.join(output_dir, "weekly_analysis_report.md")
+
+    with open(report_file, 'w') as f:
+        f.write("# Maritime Pilot Boat Analysis - Weekly Report\n\n")
+        f.write(f"**Analysis Period:** June 1-7, 2023 (7 days)\n")
+        f.write(f"**Report Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+        f.write("## Executive Summary\n\n")
+
+        if daily_summaries:
+            total_sessions = sum(day['total_sessions'] for day in daily_summaries)
+            total_events = sum(day['total_events'] for day in daily_summaries)
+            total_time = sum(day['total_assistance_time'] for day in daily_summaries)
+
+            f.write(f"- **Total Assistance Sessions:** {total_sessions}\n")
+            f.write(f"- **Total Proximity Events:** {total_events}\n")
+            f.write(f"- **Total Assistance Time:** {total_time:.1f} minutes ({total_time/60:.1f} hours)\n")
+            f.write(f"- **Average Sessions per Day:** {total_sessions/7:.1f}\n\n")
+
+        f.write("## Daily Breakdown\n\n")
+        f.write("| Day | Date | Sessions | Events | Pilot Boats | Vessels | Duration (min) |\n")
+        f.write("|-----|------|----------|--------|-------------|---------|----------------|\n")
+
+        for day in daily_summaries:
+            f.write(f"| {day['day_number']} | {day['date']} | {day['total_sessions']} | "
+                   f"{day['total_events']} | {day['unique_pilot_boats']} | "
+                   f"{day['unique_vessels']} | {day['total_assistance_time']:.1f} |\n")
+
+        f.write("\n## Traffic Direction Analysis\n\n")
+        if daily_summaries:
+            total_inbound = sum(day['inbound_sessions'] for day in daily_summaries)
+            total_outbound = sum(day['outbound_sessions'] for day in daily_summaries)
+            total_other = sum(day['other_sessions'] for day in daily_summaries)
+            total_classified = total_inbound + total_outbound + total_other
+
+            if total_classified > 0:
+                f.write(f"- **Inbound Traffic:** {total_inbound} sessions ({total_inbound/total_classified*100:.1f}%)\n")
+                f.write(f"- **Outbound Traffic:** {total_outbound} sessions ({total_outbound/total_classified*100:.1f}%)\n")
+                f.write(f"- **Other/Mixed Traffic:** {total_other} sessions ({total_other/total_classified*100:.1f}%)\n\n")
+
+        f.write("## Key Findings\n\n")
+        f.write("- Analysis covers 7 consecutive days of AIS data\n")
+        f.write("- Dynamic proximity thresholds based on vessel dimensions\n")
+        f.write("- Enhanced traffic direction classification with hybrid methodology\n")
+        f.write("- Comprehensive session detection with temporal continuity\n\n")
+
+        f.write("## Data Quality Notes\n\n")
+        f.write("- Vessel size filtering applied (width > 2m, LOA >= 60m)\n")
+        f.write("- Tug boats excluded from analysis\n")
+        f.write("- Course alignment validation (<=20° difference)\n")
+        f.write("- Speed similarity validation for assistance operations\n\n")
+
+    print(f"SUCCESS: Weekly analysis report: {report_file}")
 
 
 if __name__ == "__main__":
-    main()
+    # Run weekly analysis by default
+    main_weekly_analysis()
