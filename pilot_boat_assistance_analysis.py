@@ -939,7 +939,7 @@ class PilotBoatAssistanceAnalyzer:
                 print("SUCCESS: Vessel MMSI 440106050 successfully excluded from dynamic data")
 
         # Convert DateTime column to datetime
-        self.dynamic_data['DateTime'] = pd.to_datetime(self.dynamic_data['DateTime'])
+        self.dynamic_data['DateTime'] = pd.to_datetime(self.dynamic_data['DateTime']).dt.floor('min')
 
         # Sort by MMSI and DateTime for efficient processing
         self.dynamic_data = self.dynamic_data.sort_values(['MMSI', 'DateTime'])
