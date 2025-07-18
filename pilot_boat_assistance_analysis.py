@@ -50,6 +50,8 @@ import pandas as pd
 import numpy as np
 import polars as pl
 from math import radians, sin, cos, sqrt, atan2
+from datetime import datetime, timedelta
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -1453,6 +1455,118 @@ class PilotBoatAssistanceAnalyzer:
 
         return has_movement
 
+    def _point_in_polygon(self, lat, lon, polygon_coords):
+        """
+        Determine if a point is inside a polygon using the ray casting algorithm.
+
+        Args:
+            lat: Latitude of the point
+            lon: Longitude of the point
+            polygon_coords: List of (lat, lon) tuples defining the polygon boundary
+
+        Returns:
+            Boolean indicating if the point is inside the polygon
+        """
+        if not polygon_coords or len(polygon_coords) < 3:
+            return False
+
+        x, y = lon, lat
+        n = len(polygon_coords)
+        inside = False
+
+        p1x, p1y = polygon_coords[0][1], polygon_coords[0][0]  # lon, lat
+        for i in range(1, n + 1):
+            p2x, p2y = polygon_coords[i % n][1], polygon_coords[i % n][0]  # lon, lat
+            if y > min(p1y, p2y):
+                if y <= max(p1y, p2y):
+                    if x <= max(p1x, p2x):
+                        if p1y != p2y:
+                            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                        if p1x == p2x or x <= xinters:
+                            inside = not inside
+            p1x, p1y = p2x, p2y
+
+        return inside
+
+    def _get_busan_exclusion_zone(self):
+        """
+        Define the Busan Port exclusion zone polygon coordinates.
+
+        Returns:
+            List of (lat, lon) tuples defining the exclusion zone boundary
+        """
+        return [
+            (35.079217, 128.775318),
+            (35.079212, 128.832938),
+            (35.071075, 128.832833),
+            (35.063953, 128.791473),
+            (35.067029, 128.783953),
+            (35.074193, 128.775244),
+            (35.079217, 128.775318)
+        ]
+
+    def _filter_sessions_by_exclusion_zone(self, sessions_df):
+        """
+        Filter out sessions where target vessels remain within the exclusion zone
+        throughout the entire interaction period.
+
+        Args:
+            sessions_df: DataFrame containing pilot boat assistance sessions
+
+        Returns:
+            Tuple of (filtered_sessions_df, filtered_count, total_count)
+        """
+        if sessions_df.empty:
+            return sessions_df, 0, 0
+
+        exclusion_zone = self._get_busan_exclusion_zone()
+        total_sessions = len(sessions_df)
+        sessions_to_keep = []
+
+        print(f"Applying geographic filtering to {total_sessions} sessions...")
+
+        for idx, session in sessions_df.iterrows():
+            vessel_mmsi = session['vessel_mmsi']
+            session_start = pd.to_datetime(session['start_time'])
+            session_end = pd.to_datetime(session['end_time'])
+
+            # Get vessel trajectory during the session
+            vessel_trajectory = self.dynamic_data[
+                (self.dynamic_data['MMSI'] == vessel_mmsi) &
+                (self.dynamic_data['DateTime'] >= session_start) &
+                (self.dynamic_data['DateTime'] <= session_end)
+            ].sort_values('DateTime')
+
+            if vessel_trajectory.empty:
+                # If no trajectory data, keep the session (conservative approach)
+                sessions_to_keep.append(idx)
+                continue
+
+            # Get start and end coordinates
+            start_lat = vessel_trajectory.iloc[0]['Latitude']
+            start_lon = vessel_trajectory.iloc[0]['Longitude']
+            end_lat = vessel_trajectory.iloc[-1]['Latitude']
+            end_lon = vessel_trajectory.iloc[-1]['Longitude']
+
+            # Check if both start and end points are within exclusion zone
+            start_in_zone = self._point_in_polygon(start_lat, start_lon, exclusion_zone)
+            end_in_zone = self._point_in_polygon(end_lat, end_lon, exclusion_zone)
+
+            # Keep session if vessel starts OR ends outside the exclusion zone
+            if not (start_in_zone and end_in_zone):
+                sessions_to_keep.append(idx)
+
+        filtered_sessions = sessions_df.loc[sessions_to_keep].copy()
+        filtered_count = total_sessions - len(filtered_sessions)
+
+        print(f"Geographic filtering results:")
+        print(f"  - Total sessions: {total_sessions}")
+        print(f"  - Sessions filtered out: {filtered_count}")
+        print(f"  - Sessions remaining: {len(filtered_sessions)}")
+        print(f"  - Filter rate: {filtered_count/total_sessions*100:.1f}%")
+
+        return filtered_sessions, filtered_count, total_sessions
+
     def _extract_trajectory_data(self, mmsi, start_time, end_time):
         """
         Extract complete trajectory data for a vessel between start and end times.
@@ -2046,8 +2160,11 @@ class PilotBoatAssistanceAnalyzer:
             print("Saved proximity events to: pilot_boat_proximity_events.csv")
 
         if hasattr(self, 'assistance_sessions') and not self.assistance_sessions.empty:
+            # Apply geographic filtering to remove noisy sessions
+            filtered_sessions, filtered_count, total_count = self._filter_sessions_by_exclusion_zone(self.assistance_sessions)
+
             # Create a copy for CSV export (trajectory data needs special handling)
-            sessions_for_csv = self.assistance_sessions.copy()
+            sessions_for_csv = filtered_sessions.copy()
 
             # Convert trajectory data to JSON strings for CSV compatibility
             if 'pilot_trajectory' in sessions_for_csv.columns:
@@ -2305,8 +2422,11 @@ def save_daily_results(analyzer, output_dir, date):
 
     # Save assistance sessions
     if hasattr(analyzer, 'assistance_sessions') and not analyzer.assistance_sessions.empty:
+        # Apply geographic filtering to remove noisy sessions
+        filtered_sessions, filtered_count, total_count = analyzer._filter_sessions_by_exclusion_zone(analyzer.assistance_sessions)
+
         # Create a copy for CSV export (trajectory data needs special handling)
-        sessions_for_csv = analyzer.assistance_sessions.copy()
+        sessions_for_csv = filtered_sessions.copy()
 
         # Convert trajectory data to string representation for CSV
         if 'pilot_trajectory' in sessions_for_csv.columns:
