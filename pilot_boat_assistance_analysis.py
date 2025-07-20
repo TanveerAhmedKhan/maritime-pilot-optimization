@@ -1526,27 +1526,16 @@ class PilotBoatAssistanceAnalyzer:
         print(f"Applying geographic filtering to {total_sessions} sessions...")
 
         for idx, session in sessions_df.iterrows():
-            vessel_mmsi = session['vessel_mmsi']
-            session_start = pd.to_datetime(session['start_time'])
-            session_end = pd.to_datetime(session['end_time'])
-
-            # Get vessel trajectory during the session
-            vessel_trajectory = self.dynamic_data[
-                (self.dynamic_data['MMSI'] == vessel_mmsi) &
-                (self.dynamic_data['DateTime'] >= session_start) &
-                (self.dynamic_data['DateTime'] <= session_end)
-            ].sort_values('DateTime')
-
-            if vessel_trajectory.empty:
-                # If no trajectory data, keep the session (conservative approach)
-                sessions_to_keep.append(idx)
-                continue
+            vessel_trajectory_data = session['vessel_extended_trajectory']
+            vessel_start = vessel_trajectory_data[0]
+            vessel_end = vessel_trajectory_data[-1]
+            
 
             # Get start and end coordinates
-            start_lat = vessel_trajectory.iloc[0]['Latitude']
-            start_lon = vessel_trajectory.iloc[0]['Longitude']
-            end_lat = vessel_trajectory.iloc[-1]['Latitude']
-            end_lon = vessel_trajectory.iloc[-1]['Longitude']
+            start_lat = vessel_start['latitude']
+            start_lon = vessel_start['longitude']
+            end_lat = vessel_end['latitude']
+            end_lon = vessel_end['longitude']
 
             # Check if both start and end points are within exclusion zone
             start_in_zone = self._point_in_polygon(start_lat, start_lon, exclusion_zone)
