@@ -1296,6 +1296,11 @@ class PilotBoatAssistanceAnalyzer:
                                 pilot_course, pilot_sog_val, is_aligned, distance, validation_reason
                             )
 
+                            # Detect nearby vessels for this specific event
+                            nearby_vessels = self._detect_nearby_vessels_for_event(
+                                vessel_mmsi, vessel_lat, vessel_lon, timestamp
+                            )
+
                             assistance_events.append({
                                 'timestamp': timestamp,
                                 'pilot_mmsi': pilot_mmsi,
@@ -1318,7 +1323,11 @@ class PilotBoatAssistanceAnalyzer:
                                 'is_boarding_operation': is_boarding_op,
                                 'validation_reason': validation_reason,
                                 'traffic_direction': vessel_traffic_direction,
-                                'pilot_traffic_direction': pilot_traffic_direction
+                                'pilot_traffic_direction': pilot_traffic_direction,
+                                # Nearby vessels data for this specific event
+                                'nearby_vessels_300m': nearby_vessels,
+                                'nearby_vessels_count': len(nearby_vessels),
+                                'unique_nearby_vessels': len(set(v['mmsi'] for v in nearby_vessels)) if nearby_vessels else 0
                             })
 
         self.assistance_events = pd.DataFrame(assistance_events)
@@ -1556,6 +1565,65 @@ class PilotBoatAssistanceAnalyzer:
 
         return filtered_sessions, filtered_count, total_sessions
 
+    def _detect_nearby_vessels_for_event(self, target_vessel_mmsi, target_lat, target_lon, event_timestamp, proximity_radius=300):
+        """
+        Detect all vessels within specified radius of target vessel at a specific event timestamp.
+
+        Args:
+            target_vessel_mmsi: MMSI of the target vessel
+            target_lat: Latitude of the target vessel at event time
+            target_lon: Longitude of the target vessel at event time
+            event_timestamp: Specific timestamp of the proximity event
+            proximity_radius: Detection radius in meters (default: 300m)
+
+        Returns:
+            List of dictionaries containing nearby vessel information
+        """
+        if self.dynamic_data is None or self.dynamic_data.empty:
+            return []
+
+        nearby_vessels = []
+
+        # Get all vessels at this exact timestamp
+        nearby_candidates = self.dynamic_data[
+            (self.dynamic_data['DateTime'] == event_timestamp) &
+            (self.dynamic_data['MMSI'] != target_vessel_mmsi) &  # Exclude target vessel
+            (~self.dynamic_data['MMSI'].isin(self.pilot_boat_mmsi))  # Exclude pilot boats
+        ]
+
+        # Calculate distances for all candidates
+        for _, candidate in nearby_candidates.iterrows():
+            candidate_lat = candidate['Latitude']
+            candidate_lon = candidate['Longitude']
+
+            # Calculate distance using haversine formula
+            distance = self.haversine_distance(
+                target_lat, target_lon, candidate_lat, candidate_lon
+            )
+
+            if distance <= proximity_radius:
+                # Get vessel type from static data if available
+                vessel_type = 'Unknown'
+                if hasattr(self, 'static_vessel_data') and self.static_vessel_data is not None:
+                    vessel_info = self.static_vessel_data[
+                        self.static_vessel_data['MMSI'] == candidate['MMSI']
+                    ]
+                    if not vessel_info.empty and 'shipType' in vessel_info.columns:
+                        vessel_type = vessel_info.iloc[0]['shipType']
+
+                nearby_vessel_info = {
+                    'mmsi': candidate['MMSI'],
+                    'distance': round(distance, 1),
+                    'timestamp': event_timestamp,
+                    'vessel_type': vessel_type,
+                    'latitude': candidate_lat,
+                    'longitude': candidate_lon
+                }
+
+                nearby_vessels.append(nearby_vessel_info)
+
+        return nearby_vessels
+
     def _extract_trajectory_data(self, mmsi, start_time, end_time):
         """
         Extract complete trajectory data for a vessel between start and end times.
@@ -1752,6 +1820,27 @@ class PilotBoatAssistanceAnalyzer:
 
                     hybrid_classification = self.analyze_session_with_hybrid_classification(session_info)
 
+                    # Preserve event-level nearby vessels data structure
+                    print(f"  - Preserving event-level nearby vessels data from {len(session_data)} events")
+                    event_level_nearby_vessels = []
+                    total_detections = 0
+                    unique_mmsis = set()
+
+                    # Collect nearby vessels for each event in chronological order
+                    for _, event in session_data.iterrows():
+                        event_nearby_vessels = []
+                        if 'nearby_vessels_300m' in event and event['nearby_vessels_300m']:
+                            event_nearby_vessels = event['nearby_vessels_300m']
+                            total_detections += len(event_nearby_vessels)
+                            # Track unique MMSIs across all events
+                            for vessel in event_nearby_vessels:
+                                unique_mmsis.add(vessel['mmsi'])
+
+                        # Append event-level nearby vessels (empty list if no vessels)
+                        event_level_nearby_vessels.append(event_nearby_vessels)
+
+                    nearby_vessels = event_level_nearby_vessels
+
                     grouped_sessions.append({
                         'pilot_mmsi': pilot_mmsi,
                         'vessel_mmsi': vessel_mmsi,
@@ -1797,7 +1886,13 @@ class PilotBoatAssistanceAnalyzer:
                         'vessel_extended_trajectory': vessel_extended_trajectory,
                         'extended_trajectory_points': len(pilot_extended_trajectory) + len(vessel_extended_trajectory),
                         'pilot_extended_trajectory_points': len(pilot_extended_trajectory),
-                        'vessel_extended_trajectory_points': len(vessel_extended_trajectory)
+                        'vessel_extended_trajectory_points': len(vessel_extended_trajectory),
+                        # Nearby vessels detection (event-level preservation)
+                        'nearby_vessels_300m': nearby_vessels,
+                        'nearby_vessels_count': total_detections,
+                        'unique_nearby_vessels': len(unique_mmsis),
+                        'events_with_nearby_vessels': sum(1 for event_vessels in nearby_vessels if event_vessels),
+                        'max_nearby_vessels_per_event': max(len(event_vessels) for event_vessels in nearby_vessels) if nearby_vessels else 0
                     })
 
         self.assistance_sessions = pd.DataFrame(grouped_sessions)
@@ -2145,7 +2240,16 @@ class PilotBoatAssistanceAnalyzer:
         print("Saving results...")
 
         if hasattr(self, 'assistance_events') and not self.assistance_events.empty:
-            self.assistance_events.to_csv('pilot_boat_proximity_events.csv', index=False)
+            # Create a copy for CSV export (nearby vessels data needs special handling)
+            events_for_csv = self.assistance_events.copy()
+
+            # Convert nearby vessels data to JSON strings for CSV compatibility
+            if 'nearby_vessels_300m' in events_for_csv.columns:
+                events_for_csv['nearby_vessels_300m'] = events_for_csv['nearby_vessels_300m'].apply(
+                    lambda x: str(x) if x else '[]'
+                )
+
+            events_for_csv.to_csv('pilot_boat_proximity_events.csv', index=False)
             print("Saved proximity events to: pilot_boat_proximity_events.csv")
 
         if hasattr(self, 'assistance_sessions') and not self.assistance_sessions.empty:
@@ -2171,6 +2275,11 @@ class PilotBoatAssistanceAnalyzer:
                 )
             if 'vessel_extended_trajectory' in sessions_for_csv.columns:
                 sessions_for_csv['vessel_extended_trajectory'] = sessions_for_csv['vessel_extended_trajectory'].apply(
+                    lambda x: str(x) if x else '[]'
+                )
+            # Convert nearby vessels data to JSON strings for CSV compatibility
+            if 'nearby_vessels_300m' in sessions_for_csv.columns:
+                sessions_for_csv['nearby_vessels_300m'] = sessions_for_csv['nearby_vessels_300m'].apply(
                     lambda x: str(x) if x else '[]'
                 )
 
@@ -2405,8 +2514,17 @@ def save_daily_results(analyzer, output_dir, date):
 
     # Save proximity events
     if hasattr(analyzer, 'assistance_events') and not analyzer.assistance_events.empty:
+        # Create a copy for CSV export (nearby vessels data needs special handling)
+        events_for_csv = analyzer.assistance_events.copy()
+
+        # Convert nearby vessels data to JSON strings for CSV compatibility
+        if 'nearby_vessels_300m' in events_for_csv.columns:
+            events_for_csv['nearby_vessels_300m'] = events_for_csv['nearby_vessels_300m'].apply(
+                lambda x: str(x) if x else '[]'
+            )
+
         events_file = os.path.join(output_dir, f"pilot_boat_proximity_events_{date}.csv")
-        analyzer.assistance_events.to_csv(events_file, index=False)
+        events_for_csv.to_csv(events_file, index=False)
         print(f"  Saved proximity events: {events_file}")
 
     # Save assistance sessions
@@ -2441,6 +2559,22 @@ def save_daily_results(analyzer, output_dir, date):
 
             sessions_for_csv['vessel_trajectory_summary'] = sessions_for_csv['vessel_trajectory'].apply(format_trajectory)
             sessions_for_csv = sessions_for_csv.drop('vessel_trajectory', axis=1)
+
+        # Handle nearby vessels data for CSV export
+        if 'nearby_vessels_300m' in sessions_for_csv.columns:
+            def format_nearby_vessels(x):
+                if x is None or (isinstance(x, float) and pd.isna(x)):
+                    return "No nearby vessels"
+                elif isinstance(x, list):
+                    return f"Nearby vessels: {len(x)}"
+                else:
+                    return "No nearby vessels"
+
+            sessions_for_csv['nearby_vessels_summary'] = sessions_for_csv['nearby_vessels_300m'].apply(format_nearby_vessels)
+            # Keep the full data as string for detailed analysis
+            sessions_for_csv['nearby_vessels_300m'] = sessions_for_csv['nearby_vessels_300m'].apply(
+                lambda x: str(x) if x else '[]'
+            )
 
         sessions_file = os.path.join(output_dir, f"pilot_boat_assistance_sessions_{date}.csv")
         sessions_for_csv.to_csv(sessions_file, index=False)
