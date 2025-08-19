@@ -52,6 +52,7 @@ import polars as pl
 from math import radians, sin, cos, sqrt, atan2
 from datetime import datetime, timedelta
 import os
+import re
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -485,15 +486,15 @@ class PilotBoatAssistanceAnalyzer:
         vessel_sog = float(vessel_sog) if not pd.isna(vessel_sog) else 0.0
 
         # Check if both vessels are in the operational speed range (5-10 knots)
-        pilot_in_range = 5.0 <= pilot_sog <= 10.0
-        vessel_in_range = 5.0 <= vessel_sog <= 10.0
+        pilot_in_range = 4.0 <= pilot_sog <= 12.0
+        vessel_in_range = 4.0 <= vessel_sog <= 12.0
 
         if not (pilot_in_range and vessel_in_range):
             return False, abs(pilot_sog - vessel_sog)
 
         # Check if speed difference is within acceptable range (≤ 3 knots)
         speed_diff = abs(pilot_sog - vessel_sog)
-        is_similar = speed_diff <= 3.0
+        is_similar = speed_diff <= 4.0
 
         return is_similar, speed_diff
 
@@ -786,55 +787,75 @@ class PilotBoatAssistanceAnalyzer:
         print("Loading static vessel data with size filtering...")
 
         try:
-            # Read the static vessel data CSV
+            # Read the static vessel data CSV (unified file)
             self.static_vessel_data = pd.read_csv(self.static_data_path)
             print(f"Loaded static vessel data: {len(self.static_vessel_data)} records")
 
-            # Check for required columns (note: 'width' is the actual column name in the data)
-            if 'MMSI' in self.static_vessel_data.columns and 'width' in self.static_vessel_data.columns and 'loa' in self.static_vessel_data.columns:
-                # Apply vessel size filtering
-                print("Applying vessel size filters...")
-                original_count = len(self.static_vessel_data)
+            # Normalize/rename columns from various possible headers
+            col_map = {}
+            for col in list(self.static_vessel_data.columns):
+                norm = str(col).lower().replace(" ", "").replace("_", "").replace("-", "").replace("(", "").replace(")", "")
+                if col == 'MMSI':
+                    col_map[col] = 'MMSI'
+                elif 'mmsi' in norm:
+                    col_map[col] = 'MMSI'
+                elif ('breadth' in norm) or ('width' in norm) or ('beam' in norm):
+                    col_map[col] = 'width'
+                elif ('lengthoverall' in norm) or ('loa' in norm) or ('lengthoveral' in norm):
+                    # Handle variants like 'lengthOverAll)Loa'
+                    col_map[col] = 'loa'
+                elif 'shiptype' in norm:
+                    col_map[col] = 'shipType'
+            if col_map:
+                self.static_vessel_data = self.static_vessel_data.rename(columns=col_map)
 
-                # Filter out vessels with width ≤ 2 meters or LOA < 60 meters
-                filtered_data = self.static_vessel_data[
-                    (self.static_vessel_data['width'] > 2) &
-                    (self.static_vessel_data['loa'] >= 60) &
-                    (pd.notna(self.static_vessel_data['width'])) &
-                    (pd.notna(self.static_vessel_data['loa']))
-                ]
-
-                filtered_count = len(filtered_data)
-                excluded_count = original_count - filtered_count
-                print(f"Vessel filtering results:")
-                print(f"- Original vessels: {original_count}")
-                print(f"- Vessels after filtering (width > 2m AND LOA >= 60m): {filtered_count}")
-                print(f"- Excluded vessels: {excluded_count}")
-
-                # Create a dictionary for fast lookup: MMSI -> width (only for filtered vessels)
+            # Ensure required columns exist
+            missing = [c for c in ['MMSI', 'width', 'loa'] if c not in self.static_vessel_data.columns]
+            if missing:
+                print(f"Warning: Required columns missing after normalization: {missing}")
                 self.vessel_width_lookup = {}
-                for _, row in filtered_data.iterrows():
-                    mmsi = row['MMSI']
-                    width = row['width']
-                    if pd.notna(width) and width > 0:
-                        self.vessel_width_lookup[mmsi] = width
+                return
 
-                print(f"Vessel width data available for {len(self.vessel_width_lookup)} vessels")
+            # Coerce numeric types
+            self.static_vessel_data['width'] = pd.to_numeric(self.static_vessel_data['width'], errors='coerce')
+            self.static_vessel_data['loa'] = pd.to_numeric(self.static_vessel_data['loa'], errors='coerce')
 
-                # Show some statistics
-                if self.vessel_width_lookup:
-                    widths = list(self.vessel_width_lookup.values())
-                    print(f"Vessel width range (filtered): {min(widths):.1f}m to {max(widths):.1f}m")
-                    print(f"Average vessel width (filtered): {sum(widths)/len(widths):.1f}m")
+            # Apply vessel size filtering
+            print("Applying vessel size filters...")
+            original_count = len(self.static_vessel_data)
 
-                    # Show LOA statistics for filtered vessels
-                    loa_values = filtered_data['loa'].dropna()
-                    if not loa_values.empty:
-                        print(f"LOA range (filtered): {loa_values.min():.1f}m to {loa_values.max():.1f}m")
-                        print(f"Average LOA (filtered): {loa_values.mean():.1f}m")
-            else:
-                print("Warning: Required columns (MMSI, width, loa) not found in static vessel data")
-                self.vessel_width_lookup = {}
+            filtered_data = self.static_vessel_data[
+                (pd.notna(self.static_vessel_data['width'])) &
+                (pd.notna(self.static_vessel_data['loa'])) &
+                (self.static_vessel_data['width'] > 2) &
+                (self.static_vessel_data['loa'] >= 60)
+            ]
+
+            filtered_count = len(filtered_data)
+            excluded_count = original_count - filtered_count
+            print("Vessel filtering results:")
+            print(f"- Original vessels: {original_count}")
+            print(f"- Vessels after filtering (width > 2m AND LOA >= 60m): {filtered_count}")
+            print(f"- Excluded vessels: {excluded_count}")
+
+            # Build width lookup for dynamic thresholds
+            self.vessel_width_lookup = {}
+            for _, row in filtered_data.iterrows():
+                mmsi = row['MMSI']
+                width = row['width']
+                if pd.notna(width) and width > 0:
+                    self.vessel_width_lookup[int(mmsi)] = float(width)
+
+            print(f"Vessel width data available for {len(self.vessel_width_lookup)} vessels")
+
+            # Some stats
+            if self.vessel_width_lookup:
+                widths = list(self.vessel_width_lookup.values())
+                print(f"Vessel width range (filtered): {min(widths):.1f}m to {max(widths):.1f}m")
+                loa_values = filtered_data['loa'].dropna()
+                if not loa_values.empty:
+                    print(f"LOA range (filtered): {loa_values.min():.1f}m to {loa_values.max():.1f}m")
+                    print(f"Average LOA (filtered): {loa_values.mean():.1f}m")
 
         except Exception as e:
             print(f"Error loading static vessel data: {e}")
@@ -901,8 +922,76 @@ class PilotBoatAssistanceAnalyzer:
         print("Loading dynamic AIS data...")
 
         # Load the CSV file
-        self.dynamic_data = pd.read_csv(self.dynamic_data_path)
-        print(f"Loaded dynamic data: {len(self.dynamic_data)} records")
+        df = pd.read_csv(self.dynamic_data_path)
+        print(f"Loaded dynamic data: {len(df)} records")
+
+        # Normalize column names to expected schema (robust to variants)
+        col_map = {}
+        for col in list(df.columns):
+            norm = str(col).lower().strip()
+            if norm in ('mmsi', 'mmsi_id'): col_map[col] = 'MMSI'
+            elif norm in ('basedatetime', 'datetime', 'date_time', 'time', 'timestamp'): col_map[col] = 'DateTime'
+            elif norm in ('latitude', 'lat', 'y', 'lat_dd'): col_map[col] = 'Latitude'
+            elif norm in ('longitude', 'lon', 'long', 'lng', 'x', 'lon_dd'): col_map[col] = 'Longitude'
+            elif norm in ('sog', 'speedoverground', 'speed_kn', 'speed', 'sog_kn'): col_map[col] = 'SOG'
+            elif norm in ('cog', 'courseoverground', 'heading', 'course', 'cog_deg'): col_map[col] = 'COG'
+        if col_map:
+            df = df.rename(columns=col_map)
+
+        # Handle duplicate or suffixed columns by picking the first match
+        def pick_first(cols, pattern):
+            for c in cols:
+                if c == pattern or c.startswith(pattern + '.'): return c
+            return None
+        cols = list(df.columns)
+        mmsi_col = pick_first(cols, 'MMSI') or next((c for c in cols if c.upper().startswith('MMSI')), None)
+        dt_col = pick_first(cols, 'DateTime') or next((c for c in cols if c.lower() in ('basedatetime','datetime','date_time','time','timestamp')), None)
+        lat_col = pick_first(cols, 'Latitude') or next((c for c in cols if c.lower() in ('latitude','lat','y','lat_dd')), None)
+        lon_col = pick_first(cols, 'Longitude') or next((c for c in cols if c.lower() in ('longitude','lon','long','lng','x','lon_dd')), None)
+
+        rename_final = {}
+        if mmsi_col and mmsi_col != 'MMSI': rename_final[mmsi_col] = 'MMSI'
+        if dt_col and dt_col != 'DateTime': rename_final[dt_col] = 'DateTime'
+        if lat_col and lat_col != 'Latitude': rename_final[lat_col] = 'Latitude'
+        if lon_col and lon_col != 'Longitude': rename_final[lon_col] = 'Longitude'
+        if rename_final:
+            df = df.rename(columns=rename_final)
+
+        # Drop duplicate columns (keep first) to avoid issues like multiple 'DateTime' columns
+        if df.columns.duplicated().any():
+            df = df.loc[:, ~df.columns.duplicated(keep='first')]
+
+        required = ['MMSI', 'DateTime', 'Latitude', 'Longitude']
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            raise ValueError(f"Dynamic data missing required columns: {missing}; available: {list(df.columns)[:20]} ...")
+
+        print("Dynamic data: columns after rename:", list(df.columns)[:20])
+
+        # Coerce types
+        print("Coercing types for MMSI/Lat/Lon/SOG/COG...")
+        df['MMSI'] = pd.to_numeric(df['MMSI'], errors='coerce')
+        df['Latitude'] = pd.to_numeric(df['Latitude'], errors='coerce')
+        df['Longitude'] = pd.to_numeric(df['Longitude'], errors='coerce')
+        if 'SOG' in df.columns:
+            df['SOG'] = pd.to_numeric(df['SOG'], errors='coerce')
+        if 'COG' in df.columns:
+            df['COG'] = pd.to_numeric(df['COG'], errors='coerce')
+
+        # Parse DateTime first to ensure validity
+        print("Parsing DateTime and flooring to minute...")
+        df['DateTime'] = pd.to_datetime(df['DateTime'], errors='coerce').dt.floor('min')
+
+        # Drop rows missing essential fields
+        print("Dropping rows with NA in required fields...")
+        df = df.dropna(subset=['MMSI', 'DateTime', 'Latitude', 'Longitude'])
+
+        # Convert MMSI to int (safe casting)
+        df['MMSI'] = df['MMSI'].astype(int)
+
+        # Assign to instance
+        self.dynamic_data = df
+        print(f"Dynamic data prepared: {len(self.dynamic_data)} records, {self.dynamic_data['MMSI'].nunique()} vessels")
 
         # Apply vessel size filtering if static data is available
         if self.use_dynamic_thresholds and hasattr(self, 'vessel_width_lookup'):
@@ -910,13 +999,9 @@ class PilotBoatAssistanceAnalyzer:
             original_count = len(self.dynamic_data)
             original_vessels = self.dynamic_data['MMSI'].nunique()
 
-            # Get list of vessels that meet size requirements (from filtered static data)
             valid_vessel_mmsi = set(self.vessel_width_lookup.keys())
-
-            # Also include pilot boats (they should always be processed regardless of size)
             valid_vessel_mmsi.update(self.pilot_boat_mmsi)
 
-            # Filter dynamic data to only include vessels that meet size requirements
             self.dynamic_data = self.dynamic_data[
                 self.dynamic_data['MMSI'].isin(valid_vessel_mmsi)
             ]
@@ -926,22 +1011,13 @@ class PilotBoatAssistanceAnalyzer:
             excluded_records = original_count - filtered_count
             excluded_vessels = original_vessels - filtered_vessels
 
-            print(f"Dynamic data vessel size filtering results:")
+            print("Dynamic data vessel size filtering results:")
             print(f"- Original records: {original_count:,}")
             print(f"- Records after filtering: {filtered_count:,}")
             print(f"- Excluded records: {excluded_records:,}")
             print(f"- Original unique vessels: {original_vessels}")
             print(f"- Vessels after filtering: {filtered_vessels}")
             print(f"- Excluded vessels: {excluded_vessels}")
-
-            # Verify specific vessel exclusion
-            if 440106050 in self.dynamic_data['MMSI'].values:
-                print("WARNING: Vessel MMSI 440106050 still present in dynamic data!")
-            else:
-                print("SUCCESS: Vessel MMSI 440106050 successfully excluded from dynamic data")
-
-        # Convert DateTime column to datetime
-        self.dynamic_data['DateTime'] = pd.to_datetime(self.dynamic_data['DateTime']).dt.floor('min')
 
         # Sort by MMSI and DateTime for efficient processing
         self.dynamic_data = self.dynamic_data.sort_values(['MMSI', 'DateTime'])
@@ -2343,6 +2419,25 @@ class PilotBoatAssistanceAnalyzer:
         for idx, session in self.assistance_sessions.iterrows():
             session_id = f"session_{idx}"
 
+            # Safely handle possible list/array content in trajectory columns
+            pilot_traj = session.get('pilot_trajectory', None)
+            vessel_traj = session.get('vessel_trajectory', None)
+
+            # Normalize to lists
+            if isinstance(pilot_traj, (list, tuple)):
+                pilot_traj_out = list(pilot_traj)
+            elif pd.isna(pilot_traj):
+                pilot_traj_out = []
+            else:
+                pilot_traj_out = []
+
+            if isinstance(vessel_traj, (list, tuple)):
+                vessel_traj_out = list(vessel_traj)
+            elif pd.isna(vessel_traj):
+                vessel_traj_out = []
+            else:
+                vessel_traj_out = []
+
             trajectory_data[session_id] = {
                 'session_info': {
                     'pilot_mmsi': int(session['pilot_mmsi']) if pd.notna(session['pilot_mmsi']) else None,
@@ -2351,8 +2446,8 @@ class PilotBoatAssistanceAnalyzer:
                     'end_time': session['end_time'].isoformat() if pd.notna(session['end_time']) else None,
                     'duration_minutes': float(session['duration_minutes']) if pd.notna(session['duration_minutes']) else None
                 },
-                'pilot_trajectory': session.get('pilot_trajectory', []) if pd.notna(session.get('pilot_trajectory')) else [],
-                'vessel_trajectory': session.get('vessel_trajectory', []) if pd.notna(session.get('vessel_trajectory')) else []
+                'pilot_trajectory': pilot_traj_out,
+                'vessel_trajectory': vessel_traj_out
             }
 
         try:
@@ -2379,122 +2474,130 @@ class PilotBoatAssistanceAnalyzer:
 #     analyzer.run_complete_analysis()
 
 
-def main_weekly_analysis():
+def main_monthly_analysis():
     """
-    Main function to run pilot boat assistance analysis for all 7 days of data.
-    Processes each day individually and creates organized output structure.
+    Main function to run pilot boat assistance analysis for monthly dynamic files.
+    Iterates through monthly CSVs and uses a single unified static data file.
     """
     import os
     from datetime import datetime
 
     print("="*80)
-    print("MARITIME PILOT BOAT ASSISTANCE ANALYSIS - WEEKLY PROCESSING")
+    print("MARITIME PILOT BOAT ASSISTANCE ANALYSIS - MONTHLY PROCESSING")
     print("="*80)
     print(f"Analysis started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
-    # Base paths
-    data_base_path = "Sample_data_&_trial_codes/dataSet/busan"
+    # Paths
+    monthly_base_path = "Sample_data_&_trial_codes/dataSet/Dynamic_09_2023_08_2024"
     pilot_boat_excel_path = "BusanPB.xlsx"
+    unified_static_path = "Sample_data_&_trial_codes/dataSet/TalkFile_Static_merged_bbox_result_gokhan.csv"
 
     # Create results directory structure
     results_base_dir = "results"
-    daily_analysis_dir = os.path.join(results_base_dir, "daily_analysis")
-    weekly_summary_dir = os.path.join(results_base_dir, "weekly_summary")
+    monthly_analysis_dir = os.path.join(results_base_dir, "monthly_analysis")
+    os.makedirs(monthly_analysis_dir, exist_ok=True)
 
-    # Create directories if they don't exist
-    os.makedirs(daily_analysis_dir, exist_ok=True)
-    os.makedirs(weekly_summary_dir, exist_ok=True)
-
-    print(f"Created output directory structure:")
-    print(f"- Daily analysis: {daily_analysis_dir}")
-    print(f"- Weekly summary: {weekly_summary_dir}")
+    print("Created output directory structure:")
+    print(f"- Monthly analysis: {monthly_analysis_dir}")
     print()
 
-    # Define the 7 days of data to process
-    dates = ["20230601", "20230602", "20230603", "20230604", "20230605", "20230606", "20230607"]
+    if not os.path.exists(monthly_base_path):
+        print(f"ERROR: Monthly dynamic data directory not found: {monthly_base_path}")
+        return
 
-    # Storage for weekly aggregation
-    weekly_sessions = []
-    weekly_events = []
-    weekly_performance = []
-    weekly_vessel_analysis = []
-    daily_summaries = []
+    if not os.path.exists(unified_static_path):
+        print(f"ERROR: Unified static data file not found: {unified_static_path}")
+        print("Please ensure the file is placed at the project root or update the path accordingly.")
+        return
 
-    # Process each day
-    for i, date in enumerate(dates, 1):
-        print(f"Processing Day {i}/7: {date}")
+    # Discover monthly CSV files
+    monthly_files = [f for f in os.listdir(monthly_base_path) if f.lower().endswith('.csv')]
+    if not monthly_files:
+        print(f"WARNING: No CSV files found in {monthly_base_path}")
+        return
+
+    # Storage for aggregation across months (optional)
+    all_sessions = []
+    all_events = []
+    all_performance = []
+    all_vessel_analysis = []
+
+    # Optional: only process the first file for debugging
+    only_first = os.environ.get('ANALYSIS_ONLY_FIRST') in ('1', 'true', 'True')
+
+    # Process each monthly file
+    for i, filename in enumerate(sorted(monthly_files), 1):
+        dynamic_data_path = os.path.join(monthly_base_path, filename)
+
+        # Derive a month label (YYYYMM) from filename if possible
+        month_label = None
+        m = re.search(r"(20\d{2})[_-]?(0[1-9]|1[0-2])", filename)
+        if m:
+            month_label = f"{m.group(1)}{m.group(2)}"
+        else:
+            # Fallback: use index-based label
+            month_label = f"file_{i}"
+
+        print(f"Processing Month {i}: {filename} -> label {month_label}")
         print("-" * 50)
 
-        # Construct file paths for this date
-        dynamic_data_path = os.path.join(data_base_path, f"Busan_Dynamic_{date}_sorted.csv")
-        static_data_path = os.path.join(data_base_path, f"Static_Busan_Dynamic_{date}.csv")
-
-        # Check if files exist
-        if not os.path.exists(dynamic_data_path):
-            print(f"WARNING: Dynamic data file not found: {dynamic_data_path}")
-            continue
-        if not os.path.exists(static_data_path):
-            print(f"WARNING: Static data file not found: {static_data_path}")
-            continue
-
         try:
-            # Create analyzer instance for this day
-            analyzer = PilotBoatAssistanceAnalyzer(dynamic_data_path, pilot_boat_excel_path, static_data_path)
+            # Create analyzer instance for this month (uses unified static file)
+            analyzer = PilotBoatAssistanceAnalyzer(dynamic_data_path, pilot_boat_excel_path, unified_static_path)
 
-            # Run complete analysis for this day
-            analyzer.run_complete_analysis()
+            # Run complete analysis for this month (optional sampling via env var ANALYSIS_SAMPLE_SIZE)
+            sample_env = os.environ.get('ANALYSIS_SAMPLE_SIZE')
+            sample_size = int(sample_env) if sample_env and sample_env.isdigit() else None
+            if sample_size:
+                print(f"Running with sample_size={sample_size} for quick verification")
+            analyzer.run_complete_analysis(sample_size=sample_size)
 
-            # Create day-specific output directory
-            day_output_dir = os.path.join(daily_analysis_dir, f"day_{i}_{date}")
-            os.makedirs(day_output_dir, exist_ok=True)
+            # Create month-specific output directory
+            month_output_dir = os.path.join(monthly_analysis_dir, f"month_{month_label}")
+            os.makedirs(month_output_dir, exist_ok=True)
 
-            # Save day-specific results
-            save_daily_results(analyzer, day_output_dir, date)
+            # Save month-specific results (reuse daily saver with month label)
+            save_daily_results(analyzer, month_output_dir, month_label)
 
-            # Collect data for weekly aggregation
+            # Collect data for aggregated summaries (optional)
             if hasattr(analyzer, 'assistance_sessions') and not analyzer.assistance_sessions.empty:
-                sessions_with_date = analyzer.assistance_sessions.copy()
-                sessions_with_date['analysis_date'] = date
-                weekly_sessions.append(sessions_with_date)
+                sessions_with_month = analyzer.assistance_sessions.copy()
+                sessions_with_month['analysis_month'] = month_label
+                all_sessions.append(sessions_with_month)
 
             if hasattr(analyzer, 'assistance_events') and not analyzer.assistance_events.empty:
-                events_with_date = analyzer.assistance_events.copy()
-                events_with_date['analysis_date'] = date
-                weekly_events.append(events_with_date)
+                events_with_month = analyzer.assistance_events.copy()
+                events_with_month['analysis_month'] = month_label
+                all_events.append(events_with_month)
 
             # Collect performance data
             pilot_performance = analyzer.analyze_pilot_boat_performance()
             if not pilot_performance.empty:
-                pilot_performance['analysis_date'] = date
-                weekly_performance.append(pilot_performance)
+                pilot_performance['analysis_month'] = month_label
+                all_performance.append(pilot_performance)
 
             vessel_analysis = analyzer.analyze_vessel_types()
             if not vessel_analysis.empty:
-                vessel_analysis['analysis_date'] = date
-                weekly_vessel_analysis.append(vessel_analysis)
+                vessel_analysis['analysis_month'] = month_label
+                all_vessel_analysis.append(vessel_analysis)
 
-            # Create daily summary
-            daily_summary = create_daily_summary(analyzer, date, i)
-            daily_summaries.append(daily_summary)
-
-            print(f"SUCCESS: Day {i} ({date}) processing completed successfully")
-            print(f"  Results saved to: {day_output_dir}")
+            print(f"SUCCESS: Month {month_label} processing completed successfully")
+            print(f"  Results saved to: {month_output_dir}")
             print()
 
         except Exception as e:
-            print(f"ERROR: Error processing day {i} ({date}): {str(e)}")
+            import traceback
+            print(f"ERROR: Error processing month {month_label}: {str(e)}")
+            traceback.print_exc()
             print()
-            continue
 
-    # Generate weekly summary
-    print("Generating weekly summary...")
-    print("-" * 50)
-    generate_weekly_summary(weekly_sessions, weekly_events, weekly_performance,
-                          weekly_vessel_analysis, daily_summaries, weekly_summary_dir)
+        if only_first:
+            print("ANALYSIS_ONLY_FIRST is set; stopping after first month for debugging.")
+            break
 
     print("="*80)
-    print("WEEKLY ANALYSIS COMPLETED SUCCESSFULLY")
+    print("MONTHLY ANALYSIS COMPLETED")
     print("="*80)
     print(f"Analysis completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Results available in: {results_base_dir}")
@@ -2901,5 +3004,5 @@ def generate_weekly_report(weekly_sessions, daily_summaries, output_dir):
 
 
 if __name__ == "__main__":
-    # Run weekly analysis by default
-    main_weekly_analysis()
+    # Run monthly analysis by default
+    main_monthly_analysis()

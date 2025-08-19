@@ -83,14 +83,20 @@ DEFAULT_ZOOM = 14
 
 
 # Full path of the target data folder
-# Day is formatted like e.g, -> 20230601
-def load_data_for_selected_day(full_data_path : str, day : str):
-    
-    data_file_path = os.path.join(full_data_path, f"pilot_boat_assistance_sessions_{day.split('_')[2]}.csv")
+# Month label is formatted like e.g., -> 202309 (YYYYMM)
+def load_data_for_selected_period(full_data_path: str, period_folder_name: str):
+
+    # period_folder_name is like 'month_202309'
+    if '_' in period_folder_name:
+        label = period_folder_name.split('_', 1)[1]
+    else:
+        label = period_folder_name
+
+    data_file_path = os.path.join(full_data_path, f"pilot_boat_assistance_sessions_{label}.csv")
     if not os.path.exists(data_file_path):
         st.warning(f"Pilot Boat Assistance sessions .csv not found at {data_file_path}")
 
-    low_level_proximity_file_path = os.path.join(full_data_path, f"pilot_boat_proximity_events_{day.split('_')[2]}.csv")
+    low_level_proximity_file_path = os.path.join(full_data_path, f"pilot_boat_proximity_events_{label}.csv")
     if not os.path.exists(low_level_proximity_file_path):
         st.warning(f"Pilot Boat Proximity .csv not found at {low_level_proximity_file_path}")
 
@@ -108,7 +114,7 @@ def load_data_for_selected_day(full_data_path : str, day : str):
     print(f"Proximity data loaded {low_level_proximity_file_path}")
     st.success(f"Proximity data loaded from {low_level_proximity_file_path}")
 
-    # compute some basic stats 
+    # compute some basic stats
     stats = {
         "total_sessions" : loaded_data_df.shape[0],
         "inbounds" : loaded_data_df[loaded_data_df["primary_traffic_direction"] == 'inbound'].shape[0],
@@ -126,7 +132,7 @@ def get_formatted_sessions_with_index(loaded_df : pd.DataFrame):
         index_session_names.append((index, formatted_name))        
     return index_session_names
 
-root_results_path = "./results/daily_analysis"
+root_results_path = "./results/monthly_analysis"
 
 
 if not os.path.exists(root_results_path):
@@ -137,21 +143,21 @@ if not os.path.exists(root_results_path):
 
 st.header("Maritime Pilot Boat and Vessel Interaction Optimization Visualization")
 
-days_available = os.listdir(root_results_path)
+periods_available = sorted(os.listdir(root_results_path))
 
-if len(days_available) == 0:
+if len(periods_available) == 0:
     st.warning(f"No data found! at {root_results_path}")
     exit()
 
 st.sidebar.markdown("<br>", unsafe_allow_html=True)  # One line of space
-selected_day = st.sidebar.selectbox("Please Select A Day", days_available, index=0)
-st.sidebar.write(f"Available interactions for <b>{len(days_available)} days</b>", unsafe_allow_html=True)
+selected_period = st.sidebar.selectbox("Please Select A Month", periods_available, index=0)
+st.sidebar.write(f"Available interactions for <b>{len(periods_available)} months</b>", unsafe_allow_html=True)
 
 
-loaded_df, stats, proximity_df = load_data_for_selected_day(os.path.join(root_results_path, selected_day), selected_day)
+loaded_df, stats, proximity_df = load_data_for_selected_period(os.path.join(root_results_path, selected_period), selected_period)
 
 st.sidebar.markdown("<br>", unsafe_allow_html=True)  # One line of space
-st.sidebar.write(f"Available Interactions on <i>{selected_day}</i> ->  <b>{stats['total_sessions']}</b>", unsafe_allow_html=True)
+st.sidebar.write(f"Available Interactions in <i>{selected_period}</i> ->  <b>{stats['total_sessions']}</b>", unsafe_allow_html=True)
 
 map = folium.Map(location=BUSAN_PORT_COORDS, zoom_start=DEFAULT_ZOOM)
 
