@@ -132,7 +132,8 @@ def get_formatted_sessions_with_index(loaded_df : pd.DataFrame):
         index_session_names.append((index, formatted_name))        
     return index_session_names
 
-root_results_path = "./results/monthly_analysis"
+# root_results_path = "./results/monthly_analysis"
+root_results_path = input("Please provide the path to the 'results/monthly_analysis' folder: ")
 
 
 if not os.path.exists(root_results_path):
